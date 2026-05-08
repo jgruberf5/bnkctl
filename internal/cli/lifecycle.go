@@ -361,17 +361,23 @@ func applyWithRetry(ctx context.Context, tfws *tf.Workspace, varFiles []string) 
 }
 
 // looksTransient reports whether an apply error matches one of the
-// known apply-time race patterns. Heuristic, not exhaustive — false
-// negatives just mean the user retries manually like before.
+// known apply-time race or transient-network patterns. Heuristic, not
+// exhaustive — false negatives just mean the user retries manually
+// like before, false positives are harmless because terraform's apply
+// is naturally idempotent for resources already in state.
 //
 // Cases covered:
 //   - "exit status 7" — curl couldn't connect (master endpoint not yet
 //     propagated; the cneinstance SCC binding curls hit this)
-//   - "Connection refused" / "i/o timeout" / "no route to host" — same
-//     class of network race
+//   - "Connection refused" / "i/o timeout" / "no route to host" /
+//     "network is unreachable" / "TLS handshake timeout" — generic
+//     transient-network class. WSL2 / VPN flapping / IBM IAM blips all
+//     surface as one of these.
+//   - "no such host" — DNS hiccup (transient, almost always self-heals)
+//   - "failed to dial" — Go net stdlib transient
 //   - "to download the config doesn't exist" — the IBM provider's
 //     ibm_container_cluster_config target dir is missing (we pre-create
-//     it now, but pin the safety net for older state)
+//     it now, but the safety net stays for older state)
 func looksTransient(err error) bool {
 	if err == nil {
 		return false
@@ -383,8 +389,11 @@ func looksTransient(err error) bool {
 		"connection refused",
 		"i/o timeout",
 		"no route to host",
-		"to download the config doesn't exist",
+		"network is unreachable",
+		"no such host",
+		"TLS handshake timeout",
 		"failed to dial",
+		"to download the config doesn't exist",
 	} {
 		if strings.Contains(s, pat) {
 			return true

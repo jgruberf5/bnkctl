@@ -122,6 +122,7 @@ The Terraform source is pinned at `init` time to the latest release tag of [`ibm
 | `bnkctl doctor` | Eight-check prereq + credentials report: `terraform` / `iperf3` / `kubectl` / `oc` / `ibmcloud` on PATH, kubeconfig present, workspace initialised, API key resolves, IBM Cloud auth works. Exits non-zero on failures (warnings don't block). |
 | `bnkctl version` | Version + commit + build date (populated via `-ldflags`). |
 | `bnkctl install [--dir PATH] [--force]` | Copy the running binary into a directory on `$PATH`. Defaults to `~/.local/bin` (no sudo); overridable. Idempotent — if the running binary is already at the destination, no-op. |
+| `bnkctl tfvars [-o PATH] [--force]` | Emit the pinned TF source's `terraform.tfvars.example` to a file (default `./terraform.tfvars`) or stdout (`-o -`). Use as a starter for `bnkctl up --var-file`. |
 | `bnkctl self update` | Pull the latest GitHub release tarball, verify SHA256 against `checksums.txt`, atomic-replace the running binary. Linux/macOS only. |
 | `bnkctl completion {bash\|zsh\|fish\|powershell}` | Print shell completion script (cobra built-in). |
 | `-o json`, `--no-color`, `-v/--verbose`, `-q/--quiet` | Global output flags. |
@@ -207,7 +208,19 @@ bnkctl: warning: parsing .env: line 3: unterminated string
 
 ### Supplying your own `terraform.tfvars`
 
-Two ways. Pick whichever fits the moment.
+Three ways, depending on whether you already have a tfvars or want to start from a template.
+
+#### Bootstrap from the upstream example
+
+```bash
+bnkctl init                    # pins a TF source first
+bnkctl tfvars                  # writes ./terraform.tfvars from the
+                               # pinned source's terraform.tfvars.example
+$EDITOR ./terraform.tfvars
+bnkctl up --var-file ./terraform.tfvars
+```
+
+`bnkctl tfvars` resolves the workspace's pinned TF source (downloading the tarball if not yet cached), reads its `terraform.tfvars.example`, and writes a copy to a path you can edit. Refuses to clobber an existing file unless `--force`. Pass `-o -` to write to stdout instead, or `-o <path>` for a non-default destination.
 
 #### `--var-file` (recommended; matches terraform's flag exactly)
 

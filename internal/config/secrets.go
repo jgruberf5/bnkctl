@@ -164,13 +164,19 @@ func apiKeyFromPrompt(workspace string) (string, error) {
 		return "", errors.New("empty API key")
 	}
 
-	fmt.Fprintf(os.Stderr, "Save to OS keychain so you don't have to re-enter it? [Y/n]: ")
+	fmt.Fprintf(os.Stderr, "Save the key for future runs? [Y/n]: ")
 	reader := bufio.NewReader(os.Stdin)
 	answer, _ := reader.ReadString('\n')
 	answer = strings.TrimSpace(strings.ToLower(answer))
 	if answer == "" || strings.HasPrefix(answer, "y") {
-		if err := SaveAPIKeyToKeychain(workspace, key); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not save to keychain: %v\n", err)
+		dest, err := SaveAPIKeyForWorkspace(workspace, key)
+		if err != nil {
+			// Both keychain and config save failed. Most common reason:
+			// workspace doesn't exist yet (init flow). The caller will
+			// re-attempt persistence after the workspace is saved.
+			fmt.Fprintf(os.Stderr, "  warning: could not persist key now (%v); the calling command may retry after the workspace is created\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "  ✓ saved to %s\n", dest)
 		}
 	}
 	return key, nil
@@ -184,6 +190,49 @@ func SaveAPIKeyToKeychain(workspace, key string) error {
 	}
 	user := workspace + "/ibmcloud_api_key"
 	return keyring.Set(keychainService, user, key)
+}
+
+// APIKeyInKeychain reports whether the workspace already has a key
+// stored in the OS keychain. Used by callers that want to decide
+// whether to also persist via config.yaml b64.
+func APIKeyInKeychain(workspace string) bool {
+	k, err := apiKeyFromKeychain(workspace)
+	return err == nil && k != ""
+}
+
+// SaveAPIKeyForWorkspace persists the key to the most reliable
+// destination available. Order:
+//
+//  1. OS keychain (recommended — process-isolated, system-managed).
+//  2. config.yaml api_key_b64 (fallback for environments without a
+//     working keychain — typically WSL2 without libsecret).
+//
+// Returns the destination it wrote to, or an error if both failed
+// (e.g. keychain unavailable AND workspace doesn't exist yet — caller
+// should retry after creating the workspace).
+//
+// Idempotent: calling repeatedly with the same key is safe.
+func SaveAPIKeyForWorkspace(workspace, key string) (string, error) {
+	if kerr := SaveAPIKeyToKeychain(workspace, key); kerr == nil {
+		return "OS keychain", nil
+	} else if cerr := saveAPIKeyToConfig(workspace, key); cerr == nil {
+		return "config.yaml (base64)", nil
+	} else {
+		return "", fmt.Errorf("keychain failed (%v) and config save failed: %w", kerr, cerr)
+	}
+}
+
+// saveAPIKeyToConfig writes api_key_b64 into the workspace's existing
+// config.yaml. The workspace must already be initialised — for first
+// `bnkctl init` flow, callers should run SaveWorkspace first then call
+// this.
+func saveAPIKeyToConfig(workspace, plaintext string) error {
+	ws, err := LoadWorkspace(workspace)
+	if err != nil {
+		return err
+	}
+	ws.IBMCloud.APIKeyB64 = base64.StdEncoding.EncodeToString([]byte(plaintext))
+	return SaveWorkspace(workspace, ws)
 }
 
 // DeleteAPIKeyFromKeychain removes the workspace's keychain entry. Used

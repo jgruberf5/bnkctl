@@ -27,6 +27,19 @@ func looksLikeGitHubRepo(s string) bool {
 	return githubRepoPattern.MatchString(strings.TrimSpace(s))
 }
 
+// envHasAPIKey reports whether any of the env vars the resolution chain
+// honours is set. Used by `bnkctl init` to decide whether to opportunistically
+// persist the resolved key into the workspace — env-driven setups don't
+// need persistent storage; they have it already.
+func envHasAPIKey() bool {
+	for _, v := range []string{"IBMCLOUD_API_KEY", "IC_API_KEY", "TF_VAR_ibmcloud_api_key", "TF_VAR_IBMCLOUD_API_KEY", "TF_VAR_IC_API_KEY"} {
+		if os.Getenv(v) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 const (
 	// defaultTFRepo is the source bnkctl drives by default. Per the
 	// PRD's "unified tag stream" decision, bnkctl pins to the latest
@@ -141,6 +154,20 @@ func runInit(_ *cobra.Command, _ []string) error {
 	}
 	cfgPath, _ := config.WorkspaceConfigPath(cctx.WorkspaceName)
 	fmt.Fprintf(os.Stderr, "\n✓ Wrote %s\n", cfgPath)
+
+	// Persist the API key for future runs. ResolveAPIKey may have
+	// already saved to the keychain during the prompt path, but if it
+	// couldn't (e.g. WSL2 without libsecret) the workspace didn't yet
+	// exist for the config.yaml fallback. Now it does — try again.
+	if !envHasAPIKey() && !config.APIKeyInKeychain(cctx.WorkspaceName) {
+		dest, perr := config.SaveAPIKeyForWorkspace(cctx.WorkspaceName, apiKey)
+		if perr == nil {
+			fmt.Fprintf(os.Stderr, "✓ API key persisted in %s\n", dest)
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: could not persist API key: %v\n", perr)
+			fmt.Fprintln(os.Stderr, "  set IBMCLOUD_API_KEY in a .env file or shell to skip the prompt next run")
+		}
+	}
 
 	// Set current_workspace pointer if nothing was set globally yet.
 	// Don't clobber an existing pointer — the user may have set it on purpose.

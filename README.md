@@ -20,10 +20,21 @@ A single-binary CLI to deploy F5 BIG-IP Next for Kubernetes (BNK) onto IBM Cloud
 
 ## Quick start (build from source today; pre-built binaries soon)
 
+> **Build requires Go 1.23 or newer.** If you don't have a recent Go on PATH, use the [Docker-based build](#build-with-docker-no-go-installation-required) — same result, no host Go needed.
+
 ```bash
 git clone https://github.com/jgruberf5/bnkctl.git
 cd bnkctl
+
+# Path A — native build (requires Go 1.23+):
+go version       # confirm: go version go1.23.x or newer
 make build
+
+# Path B — Docker build (no host Go installation required):
+docker run --rm -v "$PWD:/work" -w /work \
+  --user "$(id -u):$(id -g)" -e HOME=/tmp \
+  golang:1.23-alpine sh -c 'go mod tidy && go build -o bin/bnkctl ./cmd/bnkctl'
+
 export PATH="$PWD/bin:$PATH"
 
 bnkctl doctor      # check prereqs (terraform, iperf3, kubeconfig, IBM creds)
@@ -126,27 +137,86 @@ The Terraform source is pinned at `init` time to the latest release tag of [`ibm
 
 ### Requirements
 
-- **Go 1.23+** — `go-version-file: go.mod` is the source of truth; check `go.mod` for the current minimum.
+- **Go 1.23 or newer** is mandatory. The module declares `go 1.23` in `go.mod`; `go-version-file: go.mod` is what CI reads. Builds fail loudly on older versions — the IBM and k8s SDKs both pull language features added in 1.23. Confirm with `go version`.
+  - **No Go installed (or have an older version)?** Skip to [Build with Docker](#build-with-docker-no-go-installation-required) — produces the same binary without touching the host Go install.
+  - Need to upgrade? Pre-built Go installers: [go.dev/dl](https://go.dev/dl/). On macOS: `brew install go`. On Linux: distro package or the tarball from go.dev.
 - **terraform** on `PATH` (>= 1.5) — required at runtime for `up` / `plan` / `apply` / `down`.
 - **iperf3** on `PATH` — required for `bnkctl test throughput`.
-- (Optional) **kubectl / oc / ibmcloud** — required only for the corresponding passthrough commands and `bnkctl shell`.
+- (Optional) **kubectl / oc / ibmcloud** — only for the corresponding passthrough commands and `bnkctl shell`.
 
-### Native build
+`bnkctl doctor` reports each of the above with ✓/⚠/✗ once you have a binary.
+
+### Build with Docker (no Go installation required)
+
+This is the recommended path if your host doesn't have Go 1.23+. Uses the official `golang:1.23-alpine` image; produces a binary in `./bin/`.
 
 ```bash
 git clone https://github.com/jgruberf5/bnkctl.git
 cd bnkctl
 
-# Fetch deps + populate go.sum (first time only).
-go mod tidy
+docker run --rm -v "$PWD:/work" -w /work \
+  --user "$(id -u):$(id -g)" -e HOME=/tmp \
+  golang:1.23-alpine sh -c 'go mod tidy && go build -o bin/bnkctl ./cmd/bnkctl'
 
-# Build the binary into ./bin/bnkctl
-make build
+./bin/bnkctl --help
+```
 
-# Or directly:
+Anatomy of the docker invocation:
+
+| Flag | Why |
+|---|---|
+| `-v "$PWD:/work"` | Bind-mount the repo into the container at `/work`. |
+| `-w /work` | Container working directory matches the mount. |
+| `--user "$(id -u):$(id -g)"` | Output binary is owned by your host user, not root. |
+| `-e HOME=/tmp` | Go writes its module cache under `$HOME`; `/tmp` is writable by any user. Without this, `go mod tidy` fails on a writable-`/root` permission error. |
+| `golang:1.23-alpine` | Pinned major version; matches `go.mod`'s minimum. |
+
+#### Cross-compile via Docker
+
+Set `GOOS` / `GOARCH` env vars in the same `docker run` to produce binaries for other platforms:
+
+```bash
+# macOS arm64 (Apple Silicon)
+docker run --rm -v "$PWD:/work" -w /work \
+  --user "$(id -u):$(id -g)" -e HOME=/tmp \
+  -e GOOS=darwin -e GOARCH=arm64 \
+  golang:1.23-alpine sh -c 'go mod tidy && go build -o bin/bnkctl-darwin-arm64 ./cmd/bnkctl'
+
+# Windows amd64
+docker run --rm -v "$PWD:/work" -w /work \
+  --user "$(id -u):$(id -g)" -e HOME=/tmp \
+  -e GOOS=windows -e GOARCH=amd64 \
+  golang:1.23-alpine sh -c 'go mod tidy && go build -o bin/bnkctl.exe ./cmd/bnkctl'
+
+# Full sweep (mirror of what goreleaser produces for tagged releases)
+for os in linux darwin windows; do
+  for arch in amd64 arm64; do
+    ext=""; [ "$os" = "windows" ] && ext=".exe"
+    docker run --rm -v "$PWD:/work" -w /work \
+      --user "$(id -u):$(id -g)" -e HOME=/tmp \
+      -e GOOS=$os -e GOARCH=$arch \
+      golang:1.23-alpine sh -c "go build -o bin/bnkctl_${os}_${arch}${ext} ./cmd/bnkctl"
+  done
+done
+```
+
+Each binary is statically linked (Alpine + `CGO_ENABLED=0` is the default for cross-compile) — no extra runtime deps for the binary itself.
+
+### Build natively
+
+If `go version` reports `1.23` or newer:
+
+```bash
+git clone https://github.com/jgruberf5/bnkctl.git
+cd bnkctl
+
+go mod tidy                          # first time only — populates go.sum
+make build                           # → bin/bnkctl
+
+# Or without Make:
 go build -o bin/bnkctl ./cmd/bnkctl
 
-# Run from anywhere:
+# Install system-wide:
 sudo install -m 0755 bin/bnkctl /usr/local/bin/bnkctl
 # OR add ./bin to PATH:
 export PATH="$PWD/bin:$PATH"
@@ -154,7 +224,7 @@ export PATH="$PWD/bin:$PATH"
 bnkctl --help
 ```
 
-### Make targets
+Make targets:
 
 ```
 make build      # go build -ldflags ... -o bin/bnkctl ./cmd/bnkctl
@@ -165,7 +235,7 @@ make run        # build + ./bin/bnkctl --help
 make clean      # rm -rf bin/
 ```
 
-`VERSION` / `COMMIT` / `DATE` are passed via `-ldflags`. Override:
+`VERSION` / `COMMIT` / `DATE` are passed via `-ldflags` and surface in `bnkctl version`:
 
 ```bash
 make build VERSION=v0.1.0
@@ -173,40 +243,11 @@ make build VERSION=v0.1.0
 # bnkctl v0.1.0 (commit abc1234, built 2026-05-08T...)
 ```
 
-### Build inside Docker (no host Go required)
-
-```bash
-docker run --rm -v "$PWD:/work" -w /work \
-  --user "$(id -u):$(id -g)" -e HOME=/tmp \
-  golang:1.23-alpine sh -c 'go mod tidy && go build -o bin/bnkctl ./cmd/bnkctl'
-```
-
-Produces a Linux binary in `bin/bnkctl`. For other targets (macOS, Windows) cross-compile inside the same container with `GOOS=darwin GOARCH=arm64 go build ...` or use `goreleaser release --snapshot --clean` (which the release workflow does for tagged releases).
-
-### Cross-compilation
-
-```bash
-# macOS arm64
-GOOS=darwin GOARCH=arm64 go build -o bin/bnkctl-darwin-arm64 ./cmd/bnkctl
-
-# Windows amd64
-GOOS=windows GOARCH=amd64 go build -o bin/bnkctl.exe ./cmd/bnkctl
-
-# Full sweep (mirror of what goreleaser produces on tag push):
-for os in linux darwin windows; do
-  for arch in amd64 arm64; do
-    ext=""
-    [ "$os" = "windows" ] && ext=".exe"
-    GOOS=$os GOARCH=$arch go build -o "bin/bnkctl_${os}_${arch}${ext}" ./cmd/bnkctl
-  done
-done
-```
-
 ### Tests
 
 ```bash
-make test           # all packages
-go test -race ./internal/config/...    # one package
+make test                                       # all packages
+go test -race ./internal/config/...             # one package
 go test -v -run TestNew ./internal/config/...   # one test
 ```
 
@@ -215,6 +256,27 @@ The `internal/ibm` package has integration tests that skip unless `IBMCLOUD_API_
 ```bash
 IBMCLOUD_API_KEY=... go test ./internal/ibm/...
 ```
+
+Same Docker pattern works for tests:
+
+```bash
+docker run --rm -v "$PWD:/work" -w /work \
+  --user "$(id -u):$(id -g)" -e HOME=/tmp \
+  golang:1.23-alpine sh -c 'go test -race ./...'
+```
+
+### Troubleshooting `make build`
+
+If `make build` fails, check in this order:
+
+```bash
+go version                # need 1.23+; "command not found" → use the Docker path
+make --version            # missing on Windows + minimal Linux; install or use the docker `go build` directly
+git rev-parse --short HEAD   # the Makefile pulls COMMIT from this; failure is benign (defaults to "none")
+go env GOPROXY            # if behind a corporate proxy, set GOPROXY accordingly before `go mod tidy`
+```
+
+The most common failure on a fresh clone is **Go too old** — `go: module requires Go 1.23` is unambiguous; install a newer Go or use the Docker path.
 
 ---
 

@@ -121,6 +121,7 @@ The Terraform source is pinned at `init` time to the latest release tag of [`ibm
 |---|---|
 | `bnkctl doctor` | Eight-check prereq + credentials report: `terraform` / `iperf3` / `kubectl` / `oc` / `ibmcloud` on PATH, kubeconfig present, workspace initialised, API key resolves, IBM Cloud auth works. Exits non-zero on failures (warnings don't block). |
 | `bnkctl version` | Version + commit + build date (populated via `-ldflags`). |
+| `bnkctl install [--dir PATH] [--force]` | Copy the running binary into a directory on `$PATH`. Defaults to `~/.local/bin` (no sudo); overridable. Idempotent — if the running binary is already at the destination, no-op. |
 | `bnkctl self update` | Pull the latest GitHub release tarball, verify SHA256 against `checksums.txt`, atomic-replace the running binary. Linux/macOS only. |
 | `bnkctl completion {bash\|zsh\|fish\|powershell}` | Print shell completion script (cobra built-in). |
 | `-o json`, `--no-color`, `-v/--verbose`, `-q/--quiet` | Global output flags. |
@@ -358,9 +359,14 @@ make build                           # → bin/bnkctl
 # Or without Make:
 go build -o bin/bnkctl ./cmd/bnkctl
 
-# Install system-wide:
-sudo install -m 0755 bin/bnkctl /usr/local/bin/bnkctl
-# OR add ./bin to PATH:
+# Install via bnkctl itself (recommended — copies into ~/.local/bin):
+./bin/bnkctl install
+
+# Or specify a directory:
+./bin/bnkctl install --dir ~/bin
+sudo ./bin/bnkctl install --dir /usr/local/bin
+
+# Or just add ./bin to PATH for ad-hoc use:
 export PATH="$PWD/bin:$PATH"
 
 bnkctl --help

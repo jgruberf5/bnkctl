@@ -45,6 +45,168 @@ bnkctl test        # DNS + connectivity + throughput
 
 ---
 
+## Full deployments — for people who already know Terraform
+
+If you live in `terraform plan` / `apply` / `destroy` and want to know *exactly* what bnkctl is doing for you and where the escape hatches are, this section is the long-form walkthrough.
+
+### What bnkctl does on top of Terraform
+
+| Concern | Raw Terraform | bnkctl |
+|---|---|---|
+| **Source code** | `git clone`, `git checkout <tag>` | `bnkctl init` pins to a release tag; `bnkctl init --upgrade-tf` bumps |
+| **Working directory** | wherever you `cd`'d | `~/.bnkctl/<workspace>/state/tf-source/<repo>-<tag>/` (per-workspace, cached) |
+| **State storage** | `terraform.tfstate` next to the .tf files (or a backend block) | bnkctl writes a `bnkctl_backend_override.tf` configuring `backend "local" { path = ~/.bnkctl/<ws>/state/terraform.tfstate }` |
+| **`.terraform/`** | next to the .tf files | `TF_DATA_DIR=~/.bnkctl/<ws>/state/terraform/` (out of the source tree) |
+| **API key** | `ibmcloud_api_key = "..."` in tfvars (plaintext on disk) | `IBMCLOUD_API_KEY` env / OS keychain / base64 in `config.yaml` / interactive prompt — **never written to disk in plaintext.** Passed to terraform via `TF_VAR_ibmcloud_api_key` env so it doesn't land in argv either. |
+| **`terraform.tfvars`** | hand-write or copy from `*.example` | `bnkctl tfvars` copies `terraform.tfvars.example` from the pinned source. `--var-file` then layers your edits on top of bnkctl's auto-rendered tfvars (config.yaml-derived). |
+| **Pre-flight dirs** | upstream module assumes `/work/.bnk/scratch/...` exists (the bnk runner image's bind-mount) | bnkctl pre-creates `<state>/kubeconfig/{cert_manager,cne_instance,flo,license}` and `<state>/scratch/f5-manifest`. Renders `kubeconfig_dir` and `scratch_dir` overrides into the auto-tfvars to point the upstream there. |
+| **`terraform init`** | run manually | run automatically as part of every `bnkctl up` / `plan` / `apply` / `destroy`, with `-reconfigure` so backend transitions land cleanly |
+| **`terraform plan` summary** | full resource diff | full resource diff (bnkctl streams terraform's stdout/stderr verbatim) |
+| **Confirmation gate** | `-auto-approve` flag or interactive prompt | `bnkctl up` prompts; `--auto` skips. `bnkctl apply` is direct (CI-style). |
+| **Transient apply failures** | re-run `terraform apply` manually | bnkctl auto-retries on `exit status 7`, `Connection refused`, `i/o timeout`, etc. — terraform's idempotence skips already-created resources |
+| **Post-apply admin kubeconfig** | `ibmcloud ks cluster config --admin -c <name>` | bnkctl reads `roks_cluster_id` from `terraform output`, fetches the admin kubeconfig directly from IBM's container service, writes to `~/.kube/config` (mode 0600). Retries on 404 (cluster propagation lag). |
+
+You can drop down to plain terraform at any point — see [§ Dropping to raw terraform](#dropping-to-raw-terraform) below.
+
+### Day 0 — first deployment, end-to-end
+
+```bash
+# 1. Install the bnkctl binary (one-time)
+git clone https://github.com/jgruberf5/bnkctl.git
+cd bnkctl
+docker run --rm -v "$PWD:/work" -w /work \
+  --user "$(id -u):$(id -g)" -e HOME=/tmp \
+  golang:1.23-alpine sh -c 'go build -o bin/bnkctl ./cmd/bnkctl'
+./bin/bnkctl install                 # → ~/.local/bin/bnkctl
+
+# 2. Sanity-check prereqs (terraform / iperf3 / IBM creds / kubeconfig)
+bnkctl doctor
+
+# 3. Initialise a workspace.
+#    - Verifies the IBM Cloud API key against IAM
+#    - Resolves the resource group ID
+#    - Pins the TF source to the latest release tag
+#    - Persists the API key (keychain → config.yaml b64 fallback)
+#    - Writes ~/.bnkctl/default/config.yaml
+bnkctl init
+
+# 4. Bootstrap a starter terraform.tfvars from the pinned upstream source.
+mkdir -p ~/my-bnk-deploy
+cd ~/my-bnk-deploy
+bnkctl tfvars
+#   ✓ Wrote ./terraform.tfvars (1187 bytes)
+
+# 5. Edit. Set whatever the upstream's example doesn't default. The
+#    api_key line can stay as YOUR_IBMCLOUD_API_KEY — bnkctl supplies
+#    it via TF_VAR_ibmcloud_api_key from env/keychain.
+$EDITOR ./terraform.tfvars
+
+# 6. Plan — read-only, never prompts.
+bnkctl plan --var-file ./terraform.tfvars
+
+# 7. Apply.
+#    - Pre-creates the kubeconfig + scratch dirs the upstream assumes
+#    - Layers bnkctl's auto-tfvars (kubeconfig_dir + scratch_dir overrides)
+#      under your --var-file
+#    - Streams terraform output verbatim
+#    - Auto-retries on transient failures
+#    - Post-apply: fetches admin kubeconfig from IBM
+bnkctl up --var-file ./terraform.tfvars
+#   ... 25–40 min for fresh ROKS + BNK ...
+#   → Fetching admin kubeconfig for "<cluster-id-from-tf-output>"
+#   ✓ Wrote /home/<user>/.kube/config (...)
+
+# 8. Verify.
+bnkctl status                        # workspace + cluster reachability
+bnkctl logs flo                      # tail F5 Lifecycle Operator logs
+bnkctl test                          # connectivity + DNS + throughput
+```
+
+### Day N — iteration
+
+```bash
+# Change a variable in your tfvars:
+$EDITOR ./terraform.tfvars
+
+# Re-apply (terraform's natural idempotence handles the diff):
+bnkctl up --var-file ./terraform.tfvars
+
+# Bump the TF source to a newer release:
+bnkctl init --upgrade-tf
+bnkctl up --var-file ./terraform.tfvars
+
+# Inspect a specific terraform output without leaving bnkctl:
+bnkctl exec terraform output -raw roks_cluster_id
+
+# Or drop into a workspace-credentialed shell for ad-hoc kubectl/oc/ibmcloud:
+bnkctl shell
+(bnkctl-default) $ kubectl get pods -A
+(bnkctl-default) $ ibmcloud ks cluster ls
+(bnkctl-default) $ exit
+```
+
+### Tear-down
+
+```bash
+# tfvars still required at destroy time — terraform parses it the same way as apply.
+bnkctl down --var-file ./terraform.tfvars
+
+# Optionally remove the workspace's local state dir:
+bnkctl ws delete default
+```
+
+### Layering order — what wins
+
+When `bnkctl up`/`plan`/`apply`/`destroy` runs, terraform sees variables from these layers, in order (later wins):
+
+1. **Auto-rendered `terraform.tfvars`** at `~/.bnkctl/<ws>/state/terraform.tfvars`. Generated from `config.yaml`. Includes `kubeconfig_dir`, `scratch_dir`, region, RG, cluster, BNK basics.
+2. **Workspace override** at `~/.bnkctl/<ws>/terraform.tfvars.user` — optional, persistent across runs of this workspace.
+3. **`--var-file <path>`** (repeatable). Each `--var-file` flag adds a file in the order given.
+4. **`TF_VAR_*` env vars** — `IBMCLOUD_API_KEY` becomes `TF_VAR_ibmcloud_api_key` automatically. Useful for one-off overrides without editing files.
+
+Standard terraform precedence applies: a `--var-file` value wins over an env-var, which wins over an earlier file's value, which wins over the auto-tfvars.
+
+### Dropping to raw terraform
+
+bnkctl owns *no* state that terraform doesn't already track. Everything bnkctl writes is in the workspace dir; terraform owns the .tf files in the resolved source dir. You can drop into either:
+
+```bash
+# All workspace state:
+ls ~/.bnkctl/default/
+#   config.yaml                terraform.tfvars.user   (optional)
+#   state/
+#     terraform.tfstate        # terraform's state file
+#     terraform.tfvars         # bnkctl's auto-rendered tfvars
+#     tf-source/<repo>-<tag>/  # the resolved upstream source
+#       main.tf
+#       variables.tf
+#       modules/...
+#       bnkctl_backend_override.tf   # bnkctl-managed; configures local backend
+#     terraform/               # TF_DATA_DIR (.terraform internals)
+#     kubeconfig/<modulename>/ # IBM provider kubeconfig downloads
+#     scratch/                 # FLO FAR + manifest extraction
+#     scratch/f5-manifest/
+#     kubeconfig (file)        # bnkctl's downloaded admin kubeconfig
+
+# To use plain terraform, cd into the source and set TF_DATA_DIR:
+cd ~/.bnkctl/default/state/tf-source/ibmcloud_terraform_bigip_next_for_kubernetes_2_3-v0.6.9/
+export TF_DATA_DIR=~/.bnkctl/default/state/terraform
+export TF_VAR_ibmcloud_api_key="$(security find-generic-password -s bnkctl -a default/ibmcloud_api_key -w)"  # macOS
+terraform plan -var-file ~/my-bnk-deploy/terraform.tfvars
+terraform apply -var-file ~/my-bnk-deploy/terraform.tfvars
+```
+
+The `bnkctl_backend_override.tf` file ensures `terraform plan` writes state to the same `~/.bnkctl/<ws>/state/terraform.tfstate` whether you invoke via bnkctl or directly. Subsequent `bnkctl up` reads the same state seamlessly.
+
+### Common questions
+
+- **Does `bnkctl up` modify `terraform.tfstate` from a previous bnk-runner deployment?** Yes — same state file, terraform's normal `apply` semantics. Existing resources stay; bnkctl just runs the plan against the current TF source.
+- **Can I run multiple workspaces against different clusters?** Yes — each `bnkctl -w <name> up` is fully isolated under `~/.bnkctl/<name>/`. State, kubeconfig, scratch, even pinned TF version are per-workspace.
+- **What if I want to run terraform from CI without bnkctl?** Use the upstream repo's `terraform.tfvars.example` directly and run `terraform` against the upstream module. bnkctl's contributions (kubeconfig pre-creation, scratch_dir override, backend.tf) only matter if you want to skip the bnk-runner's `/work` mount layout. Most CI setups can either run inside the bnk runner or replicate bnkctl's layout via env vars.
+- **What if the upstream source moves to v0.7.0 with breaking changes?** `bnkctl init --upgrade-tf` re-pins; you'll see new variables in `bnkctl tfvars` output. bnkctl's tfvars rendering is forward-compatible — undeclared variables warn but don't break.
+
+---
+
 ## Features
 
 ### Lifecycle (deploy + manage BNK)

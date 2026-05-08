@@ -1,0 +1,52 @@
+name: Release
+
+# Triggers on tag push (vX.Y.Z). goreleaser creates the GitHub Release,
+# builds linux/darwin/windows × amd64/arm64 binaries, generates the
+# checksums.txt asset, and attaches everything.
+#
+# This is what makes `bnkctl self update` actually work — the asset
+# names goreleaser produces match what self.go expects.
+#
+# To cut a release:
+#
+#   git tag v0.1.0
+#   git push origin v0.1.0
+#
+# The workflow_dispatch path is a manual fallback for re-running the
+# build against an existing tag (e.g. if the first attempt failed mid-way).
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to re-build (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write # required to upload release assets
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # goreleaser needs full history for the changelog generator.
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,62 @@
+name: CI
+
+# Runs on every PR and on push to main. Catches the SDK-method-name and
+# version-pin guesses captured in docs/SHAKEOUT.md without needing
+# anyone to drive a local build.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: vet + test + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Reads Go version from go.mod so bumps stay in lockstep.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve modules
+        run: |
+          go mod download
+          go mod verify
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        # -race catches data races; cheap to run on the small unit suite
+        # we have today.
+        run: go test -race ./...
+
+      - name: go build
+        # Build everything (cmd/ + internal/) to catch any unused-import
+        # or undefined-symbol issues that vet/test missed.
+        run: go build ./...
+
+  goreleaser-check:
+    name: goreleaser config sanity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          # `check` validates .goreleaser.yml without producing artefacts.
+          # Catches typos and template breaks before tag time.
+          args: check

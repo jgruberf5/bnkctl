@@ -1,0 +1,172 @@
+package tf
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+
+	"github.com/hashicorp/terraform-exec/tfexec"
+
+	"github.com/jgruberf5/bnkctl/internal/config"
+)
+
+// Workspace ties together the terraform working directory (resolved TF
+// source), the per-bnkctl-workspace state directory, and a configured
+// terraform-exec handle that drives plan/apply/destroy.
+//
+// One Workspace per command invocation. Not safe for concurrent reuse.
+type Workspace struct {
+	name      string
+	sourceDir string
+	stateDir  string
+	tf        *tfexec.Terraform
+}
+
+// Open prepares a Workspace for terraform operations:
+//
+//   - Locates `terraform` on PATH; clear error if missing.
+//   - Resolves the TF source via FetchSource (downloads if needed).
+//   - Constructs a terraform-exec handle with TF_DATA_DIR pointing at
+//     stateDir/terraform/, so .terraform/ doesn't pollute the source dir.
+//   - Exports apiKey as TF_VAR_ibmcloud_api_key in the env terraform sees.
+//     The key is never written to disk by bnkctl.
+//
+// stdout/stderr (if non-nil) get terraform's streamed output. Pass
+// os.Stdout / os.Stderr from CLI commands.
+func Open(
+	ctx context.Context,
+	name string,
+	wsCfg *config.Workspace,
+	stateDir string,
+	apiKey string,
+	stdout, stderr io.Writer,
+) (*Workspace, error) {
+	if wsCfg == nil {
+		return nil, fmt.Errorf("workspace config is nil (run `bnkctl init`)")
+	}
+
+	tfBin, err := exec.LookPath("terraform")
+	if err != nil {
+		return nil, fmt.Errorf("terraform not found on PATH — install terraform >= 1.5 (https://developer.hashicorp.com/terraform/install)")
+	}
+
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		return nil, fmt.Errorf("creating state dir %s: %w", stateDir, err)
+	}
+	srcRoot := filepath.Join(stateDir, "tf-source")
+	if err := os.MkdirAll(srcRoot, 0o755); err != nil {
+		return nil, fmt.Errorf("creating tf-source dir %s: %w", srcRoot, err)
+	}
+
+	sourceDir, err := FetchSource(ctx, wsCfg.TFSource, srcRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	tf, err := tfexec.NewTerraform(sourceDir, tfBin)
+	if err != nil {
+		return nil, fmt.Errorf("initialising terraform-exec: %w", err)
+	}
+
+	if stdout != nil {
+		tf.SetStdout(stdout)
+	}
+	if stderr != nil {
+		tf.SetStderr(stderr)
+	}
+
+	// Build the env terraform sees. Start from the host env so PATH,
+	// HOME, etc. are present, then layer in our overrides.
+	env := envSnapshot()
+	env["TF_DATA_DIR"] = filepath.Join(stateDir, "terraform")
+	if apiKey != "" {
+		env["TF_VAR_ibmcloud_api_key"] = apiKey
+	}
+	if err := tf.SetEnv(env); err != nil {
+		return nil, fmt.Errorf("setting terraform env: %w", err)
+	}
+
+	return &Workspace{
+		name:      name,
+		sourceDir: sourceDir,
+		stateDir:  stateDir,
+		tf:        tf,
+	}, nil
+}
+
+// SourceDir is the path containing the resolved .tf files.
+func (w *Workspace) SourceDir() string { return w.sourceDir }
+
+// StateDir is the bnkctl per-workspace state root.
+func (w *Workspace) StateDir() string { return w.stateDir }
+
+// TFVarsPath: <stateDir>/terraform.tfvars
+func (w *Workspace) TFVarsPath() string {
+	return filepath.Join(w.stateDir, "terraform.tfvars")
+}
+
+// StatePath: <stateDir>/terraform.tfstate
+func (w *Workspace) StatePath() string {
+	return filepath.Join(w.stateDir, "terraform.tfstate")
+}
+
+// WriteTFVars renders wsCfg into the workspace's terraform.tfvars file
+// (excluding api_key — see WriteTFVars in vars.go).
+func (w *Workspace) WriteTFVars(wsCfg *config.Workspace) error {
+	return WriteTFVars(w.TFVarsPath(), wsCfg)
+}
+
+// Init runs `terraform init`.
+func (w *Workspace) Init(ctx context.Context) error {
+	return w.tf.Init(ctx, tfexec.Upgrade(false))
+}
+
+// Plan runs `terraform plan`. Returns true if changes are pending.
+func (w *Workspace) Plan(ctx context.Context) (bool, error) {
+	return w.tf.Plan(ctx,
+		tfexec.VarFile(w.TFVarsPath()),
+		tfexec.State(w.StatePath()),
+	)
+}
+
+// Apply runs `terraform apply`. tfexec auto-passes -auto-approve since
+// terraform-exec doesn't allow interactive prompts; bnkctl's own
+// confirmation gate runs at the CLI layer instead.
+func (w *Workspace) Apply(ctx context.Context) error {
+	return w.tf.Apply(ctx,
+		tfexec.VarFile(w.TFVarsPath()),
+		tfexec.State(w.StatePath()),
+	)
+}
+
+// Destroy runs `terraform destroy`.
+func (w *Workspace) Destroy(ctx context.Context) error {
+	return w.tf.Destroy(ctx,
+		tfexec.VarFile(w.TFVarsPath()),
+		tfexec.State(w.StatePath()),
+	)
+}
+
+// Output reads terraform outputs (raw values + sensitivity flags).
+func (w *Workspace) Output(ctx context.Context) (map[string]tfexec.OutputMeta, error) {
+	return w.tf.Output(ctx, tfexec.State(w.StatePath()))
+}
+
+// envSnapshot copies os.Environ() into a map[string]string suitable for
+// tfexec.SetEnv.
+func envSnapshot() map[string]string {
+	src := os.Environ()
+	m := make(map[string]string, len(src))
+	for _, kv := range src {
+		for i := 0; i < len(kv); i++ {
+			if kv[i] == '=' {
+				m[kv[:i]] = kv[i+1:]
+				break
+			}
+		}
+	}
+	return m
+}

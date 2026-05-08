@@ -1,0 +1,16 @@
+/bin/
+*.test
+*.out
+*.exe
+*.exe~
+.DS_Store
+
+# bnkctl-managed state, never commit
+.bnkctl/
+
+# IDE
+.vscode/
+.idea/
+
+# goreleaser
+dist/

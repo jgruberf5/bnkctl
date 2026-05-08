@@ -78,15 +78,22 @@ func Open(
 		tf.SetStderr(stderr)
 	}
 
-	// Build the env terraform sees. Start from the host env so PATH,
-	// HOME, etc. are present, then layer in our overrides.
-	env := envSnapshot()
-	env["TF_DATA_DIR"] = filepath.Join(stateDir, "terraform")
-	if apiKey != "" {
-		env["TF_VAR_ibmcloud_api_key"] = apiKey
+	// terraform-exec inherits the bnkctl process env when SetEnv is
+	// NOT called. We deliberately don't call SetEnv: it explicitly
+	// rejects TF_VAR_* keys ("manual setting of env var TF_VAR_X
+	// detected"), and we want to pass apiKey as TF_VAR_ibmcloud_api_key
+	// rather than as a `tfexec.Var()` option (which would land the key
+	// in argv / `ps` output).
+	//
+	// Setting on the bnkctl process env is acceptable because bnkctl
+	// runs one terraform operation per invocation and exits.
+	if err := os.Setenv("TF_DATA_DIR", filepath.Join(stateDir, "terraform")); err != nil {
+		return nil, fmt.Errorf("setting TF_DATA_DIR: %w", err)
 	}
-	if err := tf.SetEnv(env); err != nil {
-		return nil, fmt.Errorf("setting terraform env: %w", err)
+	if apiKey != "" {
+		if err := os.Setenv("TF_VAR_ibmcloud_api_key", apiKey); err != nil {
+			return nil, fmt.Errorf("setting TF_VAR_ibmcloud_api_key: %w", err)
+		}
 	}
 
 	return &Workspace{
@@ -194,18 +201,3 @@ func (w *Workspace) Output(ctx context.Context) (map[string]tfexec.OutputMeta, e
 	return w.tf.Output(ctx, tfexec.State(w.StatePath()))
 }
 
-// envSnapshot copies os.Environ() into a map[string]string suitable for
-// tfexec.SetEnv.
-func envSnapshot() map[string]string {
-	src := os.Environ()
-	m := make(map[string]string, len(src))
-	for _, kv := range src {
-		for i := 0; i < len(kv); i++ {
-			if kv[i] == '=' {
-				m[kv[:i]] = kv[i+1:]
-				break
-			}
-		}
-	}
-	return m
-}

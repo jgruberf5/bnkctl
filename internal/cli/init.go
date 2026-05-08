@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -13,6 +15,17 @@ import (
 	"github.com/jgruberf5/bnkctl/internal/ibm"
 	"github.com/jgruberf5/bnkctl/internal/tf"
 )
+
+// githubRepoPattern matches a GitHub-shaped "owner/repo" slug. Used by
+// the init prompt to decide whether a user-typed TF source is a GitHub
+// repo or a local path. Must match the full input.
+var githubRepoPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+
+// looksLikeGitHubRepo reports whether s matches the "owner/repo" pattern.
+// Anything else (paths, URLs, blank) is treated as a local path.
+func looksLikeGitHubRepo(s string) bool {
+	return githubRepoPattern.MatchString(strings.TrimSpace(s))
+}
 
 const (
 	// defaultTFRepo is the source bnkctl drives by default. Per the
@@ -110,7 +123,7 @@ func runInit(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	tfCfg, err := resolveTFSource(ctx)
+	tfCfg, err := promptTFSource(ctx, cctx)
 	if err != nil {
 		return err
 	}
@@ -143,13 +156,31 @@ func runInit(_ *cobra.Command, _ []string) error {
 	return nil
 }
 
-// runUpgradeTF re-resolves the TF source ref (or accepts --tf-source) and
+// runUpgradeTF re-resolves the TF source ref against the workspace's
+// existing repo (or accepts --tf-source for a local override) and
 // rewrites the workspace config. No prompts.
 func runUpgradeTF(ctx context.Context, cctx *config.Context) error {
-	tfCfg, err := resolveTFSource(ctx)
+	if flagTFSource != "" {
+		// Local-path override.
+		tfCfg := config.TFSourceCfg{Type: "local", Path: flagTFSource}
+		return saveTFSourceUpdate(cctx, tfCfg)
+	}
+	// Re-resolve latest release of whatever repo this workspace is
+	// pinned to (default if it was never explicitly set).
+	repo := defaultTFRepo
+	if cctx.Workspace.TFSource.Type == "github" && cctx.Workspace.TFSource.Repo != "" {
+		repo = cctx.Workspace.TFSource.Repo
+	}
+	tfCfg, err := resolveLatestRelease(ctx, repo)
 	if err != nil {
 		return err
 	}
+	return saveTFSourceUpdate(cctx, tfCfg)
+}
+
+// saveTFSourceUpdate writes a new TF source into the workspace config,
+// or no-ops if it matches what's already there. Used by --upgrade-tf.
+func saveTFSourceUpdate(cctx *config.Context, tfCfg config.TFSourceCfg) error {
 	if cctx.Workspace.TFSource == tfCfg {
 		fmt.Fprintf(os.Stderr, "TF source already at %s\n", refDescription(tfCfg))
 		return nil
@@ -163,19 +194,62 @@ func runUpgradeTF(ctx context.Context, cctx *config.Context) error {
 	return nil
 }
 
-// resolveTFSource returns the TFSourceCfg dictated by --tf-source (local
-// override) or by querying GitHub for the latest release.
-func resolveTFSource(ctx context.Context) (config.TFSourceCfg, error) {
+// promptTFSource asks the user where Terraform should pull from. Accepts
+// either a GitHub `owner/repo` slug (resolves to that repo's latest
+// release) or any other input (treated as a local filesystem path).
+//
+// --tf-source short-circuits the prompt with a local override, matching
+// the existing flag's behaviour.
+//
+// On re-init, the existing workspace's TF source is the default — users
+// just press Enter to keep it.
+func promptTFSource(ctx context.Context, cctx *config.Context) (config.TFSourceCfg, error) {
 	if flagTFSource != "" {
-		return config.TFSourceCfg{Type: "local", Path: flagTFSource}, nil
+		cfg := config.TFSourceCfg{Type: "local", Path: flagTFSource}
+		fmt.Fprintf(os.Stderr, "✓ TF source: local path %s\n", flagTFSource)
+		return cfg, nil
 	}
-	fmt.Fprintln(os.Stderr, "→ Resolving Terraform source (latest release)...")
-	ref, err := tf.ResolveLatestRelease(ctx, defaultTFRepo)
+
+	def := defaultTFRepo
+	if cctx.Workspace != nil {
+		switch cctx.Workspace.TFSource.Type {
+		case "github":
+			if cctx.Workspace.TFSource.Repo != "" {
+				def = cctx.Workspace.TFSource.Repo
+			}
+		case "local":
+			if cctx.Workspace.TFSource.Path != "" {
+				def = cctx.Workspace.TFSource.Path
+			}
+		}
+	}
+
+	fmt.Fprintln(os.Stderr, "\nTerraform source — owner/repo for a GitHub repo, or a path for a local checkout.")
+	input := promptString("TF source", def)
+
+	if looksLikeGitHubRepo(input) {
+		cfg, err := resolveLatestRelease(ctx, input)
+		if err != nil {
+			return config.TFSourceCfg{}, err
+		}
+		return cfg, nil
+	}
+
+	// Anything that's not GitHub-shaped is treated as a local path.
+	fmt.Fprintf(os.Stderr, "✓ TF source: local path %s\n", input)
+	return config.TFSourceCfg{Type: "local", Path: input}, nil
+}
+
+// resolveLatestRelease queries GitHub for the latest release of repo and
+// returns a fully-formed TFSourceCfg pinned to that tag.
+func resolveLatestRelease(ctx context.Context, repo string) (config.TFSourceCfg, error) {
+	fmt.Fprintf(os.Stderr, "→ Resolving latest release of %s...\n", repo)
+	ref, err := tf.ResolveLatestRelease(ctx, repo)
 	if err != nil {
 		return config.TFSourceCfg{}, fmt.Errorf("resolving TF source from GitHub: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "✓ Pinned to %s@%s\n", defaultTFRepo, ref)
-	return config.TFSourceCfg{Type: "github", Repo: defaultTFRepo, Ref: ref}, nil
+	fmt.Fprintf(os.Stderr, "✓ TF source: %s@%s\n", repo, ref)
+	return config.TFSourceCfg{Type: "github", Repo: repo, Ref: ref}, nil
 }
 
 // initDefaults returns prompt defaults: existing workspace values first,

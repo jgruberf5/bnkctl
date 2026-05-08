@@ -60,6 +60,17 @@ func Open(
 	if err := os.MkdirAll(srcRoot, 0o755); err != nil {
 		return nil, fmt.Errorf("creating tf-source dir %s: %w", srcRoot, err)
 	}
+	// Pre-create the per-module kubeconfig subdirs that
+	// ibm_container_cluster_config writes into. The IBM provider does
+	// NOT MkdirAll, so a missing leaf surfaces at plan time as
+	// "Path: ..., to download the config doesn't exist". Doing this
+	// here keeps it idempotent across plan/apply/destroy.
+	kcDir := filepath.Join(stateDir, "kubeconfig")
+	for _, sub := range []string{"cert_manager", "cne_instance", "flo", "license"} {
+		if err := os.MkdirAll(filepath.Join(kcDir, sub), 0o755); err != nil {
+			return nil, fmt.Errorf("creating %s: %w", filepath.Join(kcDir, sub), err)
+		}
+	}
 
 	sourceDir, err := FetchSource(ctx, wsCfg.TFSource, srcRoot)
 	if err != nil {
@@ -155,9 +166,18 @@ func (w *Workspace) StatePath() string {
 }
 
 // WriteTFVars renders wsCfg into the workspace's terraform.tfvars file
-// (excluding api_key — see WriteTFVars in vars.go).
+// (excluding api_key — see WriteTFVars in vars.go). kubeconfig_dir is
+// rendered at <stateDir>/kubeconfig — bnkctl pre-creates the per-module
+// subdirs in Open() so the IBM provider's data sources find them.
 func (w *Workspace) WriteTFVars(wsCfg *config.Workspace) error {
-	return WriteTFVars(w.TFVarsPath(), wsCfg)
+	return WriteTFVars(w.TFVarsPath(), wsCfg, w.KubeconfigDir())
+}
+
+// KubeconfigDir is the path threaded through to the root TF's
+// kubeconfig_dir variable (v0.6.8+). Each submodule appends its own
+// name as a subdir; bnkctl pre-creates them in Open.
+func (w *Workspace) KubeconfigDir() string {
+	return filepath.Join(w.stateDir, "kubeconfig")
 }
 
 // Init runs `terraform init`.

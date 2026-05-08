@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -108,7 +109,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(os.Stderr, "✓ no changes")
 		// Even with no infra changes, fetching the kubeconfig is useful
 		// (cluster may already exist; user wants creds locally).
-		tryAutoKubeconfig(cmd.Context(), cctx)
+		tryAutoKubeconfig(cmd.Context(), cctx, tfws)
 		return nil
 	}
 	if !flagAuto && !promptYesNo("Apply this plan?", false) {
@@ -119,7 +120,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	if err := tfws.Apply(cmd.Context(), flagVarFiles...); err != nil {
 		return err
 	}
-	tryAutoKubeconfig(cmd.Context(), cctx)
+	tryAutoKubeconfig(cmd.Context(), cctx, tfws)
 	return nil
 }
 
@@ -151,7 +152,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	if err := tfws.Apply(cmd.Context(), flagVarFiles...); err != nil {
 		return err
 	}
-	tryAutoKubeconfig(cmd.Context(), cctx)
+	tryAutoKubeconfig(cmd.Context(), cctx, tfws)
 	return nil
 }
 
@@ -234,14 +235,14 @@ func writeAndInit(ctx context.Context, tfws *tf.Workspace, ws *config.Workspace)
 // convenience the user can still grab via `bnkctl kubeconfig --download`.
 //
 // Skipped entirely with --no-kubeconfig.
-func tryAutoKubeconfig(ctx context.Context, cctx *config.Context) {
+func tryAutoKubeconfig(ctx context.Context, cctx *config.Context, tfws *tf.Workspace) {
 	if flagNoKubeconfig {
 		return
 	}
 	if cctx == nil || cctx.Workspace == nil {
 		return
 	}
-	cluster := cctx.Workspace.Cluster.Name
+	cluster := resolveClusterIdentity(ctx, cctx, tfws)
 	if cluster == "" {
 		return
 	}
@@ -280,4 +281,36 @@ func tryAutoKubeconfig(ctx context.Context, cctx *config.Context) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "✓ Wrote kubeconfig to %s\n", target)
+}
+
+// resolveClusterIdentity figures out which cluster to fetch the
+// kubeconfig for. Order:
+//
+//  1. Terraform output `roks_cluster_id` — post-apply truth, the actual
+//     ID provisioned. Beats config.yaml when the user's --var-file
+//     overrides cluster.name.
+//  2. Terraform output `roks_cluster_name` — same idea, slightly less
+//     stable if the cluster was renamed.
+//  3. cctx.Workspace.Cluster.Name — config.yaml fallback (pre-apply or
+//     if outputs aren't reachable).
+//
+// Returns "" if no source produced a usable identity — caller skips
+// auto-fetch silently.
+func resolveClusterIdentity(ctx context.Context, cctx *config.Context, tfws *tf.Workspace) string {
+	if tfws != nil {
+		if outputs, err := tfws.Output(ctx); err == nil {
+			for _, key := range []string{"roks_cluster_id", "roks_cluster_name"} {
+				if om, ok := outputs[key]; ok && len(om.Value) > 0 {
+					var s string
+					if json.Unmarshal(om.Value, &s) == nil && s != "" {
+						return s
+					}
+				}
+			}
+		}
+	}
+	if cctx != nil && cctx.Workspace != nil {
+		return cctx.Workspace.Cluster.Name
+	}
+	return ""
 }

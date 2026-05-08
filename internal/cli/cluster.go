@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/jgruberf5/bnkctl/internal/config"
 	"github.com/jgruberf5/bnkctl/internal/k8s"
+	"github.com/jgruberf5/bnkctl/internal/tf"
 )
 
 var (
@@ -124,7 +127,14 @@ func runKubeconfig(cmd *cobra.Command, _ []string) error {
 
 // runKubeconfigDownload fetches the admin kubeconfig directly from
 // IBM's container service and saves it to $KUBECONFIG (or ~/.kube/config).
-// Uses the workspace's cluster.name as the default target.
+// Picks the target cluster from (in order):
+//
+//  1. --cluster flag (explicit user override)
+//  2. terraform output `roks_cluster_id` from the workspace state
+//     (post-apply truth, beats config.yaml when --var-file overrode
+//     the cluster name)
+//  3. terraform output `roks_cluster_name`
+//  4. workspace config.yaml's cluster.name (pre-apply fallback)
 func runKubeconfigDownload(cmd *cobra.Command) error {
 	cctx, ic, err := openIBMClient()
 	if err != nil {
@@ -132,11 +142,15 @@ func runKubeconfigDownload(cmd *cobra.Command) error {
 	}
 
 	cluster := flagKubeconfigCluster
+	if cluster == "" {
+		// Try terraform output first (catches --var-file-overridden names).
+		cluster = clusterFromTFOutput(cmd.Context(), cctx)
+	}
 	if cluster == "" && cctx.Workspace != nil {
 		cluster = cctx.Workspace.Cluster.Name
 	}
 	if cluster == "" {
-		return fmt.Errorf("--cluster required (or set cluster.name in the workspace config)")
+		return fmt.Errorf("--cluster required (or set cluster.name in the workspace config, or run after `bnkctl up`)")
 	}
 
 	fmt.Fprintf(os.Stderr, "→ Fetching admin kubeconfig for %q\n", cluster)
@@ -238,4 +252,40 @@ func runWithEnv(bin string, args, env []string) error {
 		return err
 	}
 	return nil
+}
+
+// clusterFromTFOutput attempts to read the post-apply cluster identity
+// from terraform's outputs (roks_cluster_id then roks_cluster_name).
+// Returns "" silently on any failure — caller falls back to config.yaml.
+//
+// Opens a minimal tf.Workspace (no source fetch beyond what's already
+// resolved on disk; no API key needed) just to call Output.
+func clusterFromTFOutput(ctx context.Context, cctx *config.Context) string {
+	if cctx == nil || cctx.Workspace == nil {
+		return ""
+	}
+	stateDir, err := config.WorkspaceStateDir(cctx.WorkspaceName)
+	if err != nil {
+		return ""
+	}
+	// Open without an API key — terraform output doesn't need creds and
+	// we don't want to trigger a prompt here. Use io.Discard equivalents
+	// for stdout/stderr — these aren't user-facing surfaces.
+	tfws, err := tf.Open(ctx, cctx.WorkspaceName, cctx.Workspace, stateDir, "", nil, nil)
+	if err != nil {
+		return ""
+	}
+	outputs, err := tfws.Output(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, key := range []string{"roks_cluster_id", "roks_cluster_name"} {
+		if om, ok := outputs[key]; ok && len(om.Value) > 0 {
+			var s string
+			if json.Unmarshal(om.Value, &s) == nil && s != "" {
+				return s
+			}
+		}
+	}
+	return ""
 }

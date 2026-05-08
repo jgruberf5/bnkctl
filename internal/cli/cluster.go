@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -187,7 +189,67 @@ func runOCPassthrough(_ *cobra.Command, args []string) error {
 }
 
 func runIBMCloudPassthrough(_ *cobra.Command, args []string) error {
-	return runPassthrough("ibmcloud", args)
+	bin, err := exec.LookPath("ibmcloud")
+	if err != nil {
+		return fmt.Errorf("ibmcloud not found on PATH (install it to use `bnkctl ibmcloud`)")
+	}
+	_, env, err := workspaceEnv()
+	if err != nil {
+		return err
+	}
+	if err := ensureIBMCloudLoggedIn(bin, env); err != nil {
+		return err
+	}
+	return runWithEnv(bin, args, env)
+}
+
+// ensureIBMCloudLoggedIn establishes a valid ibmcloud session before
+// passthrough commands run. Stateful CLI commands (ks, target, etc.)
+// fail with "Log in to the IBM Cloud CLI" if no session is cached
+// in ~/.bluemix/, even with IBMCLOUD_API_KEY set in env.
+//
+// Strategy:
+//  1. Probe with `ibmcloud account show` (fast, no side effects).
+//  2. If that succeeds, session is good — skip login.
+//  3. Otherwise run `ibmcloud login -r <region>` with IBMCLOUD_API_KEY
+//     in env. The CLI does non-interactive apikey login when the env
+//     var is set.
+//
+// Login output is streamed to stderr so users see what's happening
+// when bnkctl is taking the extra second.
+func ensureIBMCloudLoggedIn(bin string, env []string) error {
+	probeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	probe := exec.CommandContext(probeCtx, bin, "account", "show")
+	probe.Env = env
+	if err := probe.Run(); err == nil {
+		return nil
+	}
+	fmt.Fprintln(os.Stderr, "→ ibmcloud login")
+	loginArgs := []string{"login"}
+	if region := envValue(env, "IBMCLOUD_REGION"); region != "" {
+		loginArgs = append(loginArgs, "-r", region)
+	}
+	login := exec.Command(bin, loginArgs...)
+	login.Env = env
+	login.Stdout = os.Stderr
+	login.Stderr = os.Stderr
+	if err := login.Run(); err != nil {
+		return fmt.Errorf("ibmcloud login failed: %w", err)
+	}
+	return nil
+}
+
+// envValue is a small helper for reading a key out of an env slice
+// (KEY=VALUE strings). Returns "" if not found.
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			return kv[len(prefix):]
+		}
+	}
+	return ""
 }
 
 func runPassthrough(tool string, args []string) error {
@@ -233,6 +295,10 @@ func workspaceEnv() (*config.Context, []string, error) {
 	if path := k8s.DefaultKubeconfigPath(); path != "" {
 		env = append(env, "KUBECONFIG="+path)
 	}
+	// Silence the "New plug-in version available" / "TIP: --check-version"
+	// banner the ibmcloud CLI prints on every invocation. It's noise the
+	// user can't act on inside the bnkctl flow.
+	env = append(env, "IBMCLOUD_VERSION_CHECK=false")
 	return cctx, env, nil
 }
 

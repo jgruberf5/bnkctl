@@ -52,10 +52,12 @@ bnkctl test        # DNS + connectivity + throughput
 | Command | Description |
 |---|---|
 | `bnkctl init [--upgrade-tf] [--tf-source PATH]` | Interactive setup. Verifies IBM Cloud credentials, resolves the resource group, pins the latest Terraform release, writes `~/.bnkctl/<workspace>/config.yaml`. |
-| `bnkctl up [--auto] [--no-kubeconfig]` | The everyday deploy: `terraform plan` → confirm (unless `--auto`) → `terraform apply` → fetch admin kubeconfig to `~/.kube/config`. |
-| `bnkctl plan` | Read-only diff. Never prompts. |
-| `bnkctl apply [--auto] [--no-kubeconfig]` | Direct apply for CI / scripted flows. Skips the plan-and-confirm gate. |
-| `bnkctl down [--auto]` | `terraform destroy` with confirmation gate. |
+| `bnkctl up [--auto] [--var-file PATH ...] [--no-kubeconfig]` | The everyday deploy: `terraform plan` → confirm (unless `--auto`) → `terraform apply` → fetch admin kubeconfig to `~/.kube/config`. |
+| `bnkctl plan [--var-file PATH ...]` | Read-only diff. Never prompts. |
+| `bnkctl apply [--auto] [--var-file PATH ...] [--no-kubeconfig]` | Direct apply for CI / scripted flows. Skips the plan-and-confirm gate. |
+| `bnkctl down [--auto] [--var-file PATH ...]` | `terraform destroy` with confirmation gate. |
+
+`--var-file` matches terraform's own flag (repeatable, later-wins). See [Supplying your own `terraform.tfvars`](#supplying-your-own-terraformtfvars) for the full layering story.
 
 The Terraform source is pinned at `init` time to the latest release tag of [`ibmcloud_terraform_bigip_next_for_kubernetes_2_3`](https://github.com/jgruberf5/ibmcloud_terraform_bigip_next_for_kubernetes_2_3). Bump it later with `bnkctl init --upgrade-tf`. Use `--tf-source ./path-to-local-checkout` to develop against a local TF working tree.
 
@@ -132,39 +134,74 @@ The Terraform source is pinned at `init` time to the latest release tag of [`ibm
 - **Override base dir:** `BNKCTL_HOME=/path/to/state` env var.
 - **Secrets:** `IBMCLOUD_API_KEY` env var or OS keychain (macOS Keychain / libsecret / Windows Credential Manager via `zalando/go-keyring`). Plaintext API keys in `config.yaml` are rejected at load time.
 
-### Importing an existing `terraform.tfvars`
+### Supplying your own `terraform.tfvars`
 
-If you already have a complete `terraform.tfvars` from a prior bnk workflow (or hand-authored against the upstream module), drop it at:
+Two ways. Pick whichever fits the moment.
+
+#### `--var-file` (recommended; matches terraform's flag exactly)
+
+```bash
+bnkctl plan --var-file /path/to/terraform.tfvars
+bnkctl up   --var-file /path/to/terraform.tfvars
+```
+
+Repeatable, in the order given:
+
+```bash
+bnkctl up --var-file base.tfvars --var-file overlay.tfvars
+```
+
+Available on `up`, `plan`, `apply`, and `down`. Same precedence as terraform: later files override earlier ones.
+
+This is the right primary surface when:
+
+- You have an existing `terraform.tfvars` from a prior bnk workflow.
+- You want to set TF variables not exposed in bnkctl's `config.yaml` schema (`testing_*`, `roks_min_worker_*`, `cert_manager_namespace`, `bigip_*`, etc. — the upstream module accepts ~40 variables; `config.yaml` maps the most common subset).
+- You're scripting CI runs and want explicit, file-by-file control.
+
+#### `terraform.tfvars.user` (workspace-persistent override)
+
+If you want the same override every time without remembering the flag, drop a file at:
 
 ```
 ~/.bnkctl/<workspace>/terraform.tfvars.user
 ```
 
-When present, bnkctl passes it to terraform as a *second* `-var-file` after the auto-rendered one. Per terraform's later-wins semantics, **values in your file override values bnkctl rendered from `config.yaml`**. You'll see this on every run:
+bnkctl picks it up automatically on every up/plan/apply/down. Useful for per-workspace persistence; `--var-file` flags still apply on top.
+
+#### Layering order
+
+bnkctl assembles `-var-file` arguments in this order — terraform's later-wins rule means each layer can override earlier ones:
+
+1. **Auto-rendered** `~/.bnkctl/<workspace>/state/terraform.tfvars` (from `config.yaml`).
+2. **`terraform.tfvars.user`** in the workspace dir, if present.
+3. **`--var-file`** paths from the command line, in flag order.
+
+You'll see the layering in the run output:
 
 ```
-→ Layering user tfvars from /home/jgruber/.bnkctl/default/terraform.tfvars.user (overrides config.yaml-derived values)
+→ Layering user tfvars from /home/jgruber/.bnkctl/default/terraform.tfvars.user
+→ terraform init
+→ terraform plan
 ```
 
-This is the right answer when:
-
-- You want to set TF variables not exposed in bnkctl's `config.yaml` schema (`testing_*`, `roks_min_worker_*`, `cert_manager_namespace`, `bigip_*`, etc. — the upstream module accepts ~40 variables; bnkctl maps the most common subset).
-- You want to pin a value without editing `config.yaml`.
-- You're migrating from a working bnk setup and just want bnkctl to use your existing tfvars.
-
-**Quick start with an existing tfvars:**
+#### Quick start with an existing tfvars
 
 ```bash
-bnkctl init                   # interactive — answer minimally; user file will override
-mkdir -p ~/.bnkctl/default
-cp /path/to/your/terraform.tfvars ~/.bnkctl/default/terraform.tfvars.user
-bnkctl plan                   # shows the merged plan; verify before apply
-bnkctl up
+bnkctl init                                              # answer minimally — your tfvars will override
+bnkctl plan --var-file /home/me/project/terraform.tfvars # confirm merged values
+bnkctl up   --var-file /home/me/project/terraform.tfvars
 ```
 
-The auto-rendered file at `~/.bnkctl/<workspace>/state/terraform.tfvars` is regenerated on every run from `config.yaml` — don't hand-edit it. Edit `config.yaml` for values you want bnkctl to track, or put values in `terraform.tfvars.user` for everything else.
+#### Note on the API key
 
-**Note on the API key:** if your `terraform.tfvars` contains `ibmcloud_api_key = "..."` it'll be sourced from the file rather than bnkctl's normal env-var/keychain path. That works, but the key ends up in plaintext on disk under `~/.bnkctl/`. The recommended pattern is to remove the `ibmcloud_api_key` line from your `terraform.tfvars.user` and let bnkctl's keychain/env-var resolution handle it.
+If your `terraform.tfvars` contains `ibmcloud_api_key = "..."` it'll be sourced from the file rather than bnkctl's normal env-var/keychain path. That works, but the key ends up in plaintext on disk wherever the file lives. The recommended pattern: remove the `ibmcloud_api_key` line from your tfvars and let bnkctl's keychain/env-var resolution pass it via `TF_VAR_ibmcloud_api_key` instead.
+
+```bash
+# Strip the api_key line on the way in:
+grep -v '^ibmcloud_api_key' /path/to/terraform.tfvars > /tmp/no-key.tfvars
+bnkctl up --var-file /tmp/no-key.tfvars
+```
 
 ---
 

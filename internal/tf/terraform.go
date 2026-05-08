@@ -124,14 +124,21 @@ func (w *Workspace) HasUserTFVars() bool {
 	return err == nil
 }
 
-// varFiles returns the list of -var-file paths to pass terraform. Order
-// matters: later files override earlier (terraform spec). The user's
-// override file goes last so user values win.
-func (w *Workspace) varFiles() []string {
+// varFiles returns the list of -var-file paths to pass terraform.
+// Order matters: later files override earlier (terraform's spec).
+//
+//	1. auto-rendered terraform.tfvars (from config.yaml)
+//	2. terraform.tfvars.user (workspace-persistent override, if present)
+//	3. extra (--var-file flags from the CLI, in the order given)
+//
+// Later layers win — a --var-file value beats both the workspace
+// override and the generated tfvars.
+func (w *Workspace) varFiles(extra ...string) []string {
 	paths := []string{w.TFVarsPath()}
 	if w.HasUserTFVars() {
 		paths = append(paths, w.UserTFVarsPath())
 	}
+	paths = append(paths, extra...)
 	return paths
 }
 
@@ -152,9 +159,11 @@ func (w *Workspace) Init(ctx context.Context) error {
 }
 
 // Plan runs `terraform plan`. Returns true if changes are pending.
-func (w *Workspace) Plan(ctx context.Context) (bool, error) {
+// extraVarFiles are appended to the var-file chain — see varFiles for
+// the precedence order.
+func (w *Workspace) Plan(ctx context.Context, extraVarFiles ...string) (bool, error) {
 	opts := []tfexec.PlanOption{tfexec.State(w.StatePath())}
-	for _, p := range w.varFiles() {
+	for _, p := range w.varFiles(extraVarFiles...) {
 		opts = append(opts, tfexec.VarFile(p))
 	}
 	return w.tf.Plan(ctx, opts...)
@@ -163,18 +172,18 @@ func (w *Workspace) Plan(ctx context.Context) (bool, error) {
 // Apply runs `terraform apply`. tfexec auto-passes -auto-approve since
 // terraform-exec doesn't allow interactive prompts; bnkctl's own
 // confirmation gate runs at the CLI layer instead.
-func (w *Workspace) Apply(ctx context.Context) error {
+func (w *Workspace) Apply(ctx context.Context, extraVarFiles ...string) error {
 	opts := []tfexec.ApplyOption{tfexec.State(w.StatePath())}
-	for _, p := range w.varFiles() {
+	for _, p := range w.varFiles(extraVarFiles...) {
 		opts = append(opts, tfexec.VarFile(p))
 	}
 	return w.tf.Apply(ctx, opts...)
 }
 
 // Destroy runs `terraform destroy`.
-func (w *Workspace) Destroy(ctx context.Context) error {
+func (w *Workspace) Destroy(ctx context.Context, extraVarFiles ...string) error {
 	opts := []tfexec.DestroyOption{tfexec.State(w.StatePath())}
-	for _, p := range w.varFiles() {
+	for _, p := range w.varFiles(extraVarFiles...) {
 		opts = append(opts, tfexec.VarFile(p))
 	}
 	return w.tf.Destroy(ctx, opts...)

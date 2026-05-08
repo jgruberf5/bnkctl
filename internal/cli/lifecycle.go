@@ -22,6 +22,7 @@ var (
 	flagTFSource     string
 	flagUpgradeTF    bool
 	flagNoKubeconfig bool
+	flagVarFiles     []string // -var-file (repeatable; matches terraform's flag)
 )
 
 var initCmd = &cobra.Command{
@@ -75,6 +76,13 @@ func init() {
 	applyCmd.Flags().BoolVar(&flagNoKubeconfig, "no-kubeconfig", false, "skip the post-apply admin kubeconfig fetch")
 	downCmd.Flags().BoolVar(&flagAuto, "auto", false, "skip the destroy confirmation")
 
+	// --var-file matches terraform's own flag: repeatable, later wins.
+	// Layered after the bnkctl-generated tfvars and the workspace's
+	// optional terraform.tfvars.user override.
+	for _, c := range []*cobra.Command{upCmd, planCmd, applyCmd, downCmd} {
+		c.Flags().StringArrayVar(&flagVarFiles, "var-file", nil, "extra TF var-file (repeatable; later files override earlier)")
+	}
+
 	rootCmd.AddCommand(initCmd, upCmd, planCmd, applyCmd, downCmd)
 }
 
@@ -92,7 +100,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	}
 
 	fmt.Fprintln(os.Stderr, "→ terraform plan")
-	changes, err := tfws.Plan(cmd.Context())
+	changes, err := tfws.Plan(cmd.Context(), flagVarFiles...)
 	if err != nil {
 		return err
 	}
@@ -108,7 +116,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	}
 
 	fmt.Fprintln(os.Stderr, "→ terraform apply")
-	if err := tfws.Apply(cmd.Context()); err != nil {
+	if err := tfws.Apply(cmd.Context(), flagVarFiles...); err != nil {
 		return err
 	}
 	tryAutoKubeconfig(cmd.Context(), cctx)
@@ -125,7 +133,7 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "→ terraform plan")
-	_, err = tfws.Plan(cmd.Context())
+	_, err = tfws.Plan(cmd.Context(), flagVarFiles...)
 	return err
 }
 
@@ -140,7 +148,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "→ terraform apply")
-	if err := tfws.Apply(cmd.Context()); err != nil {
+	if err := tfws.Apply(cmd.Context(), flagVarFiles...); err != nil {
 		return err
 	}
 	tryAutoKubeconfig(cmd.Context(), cctx)
@@ -163,7 +171,7 @@ func runDown(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "→ terraform destroy")
-	return tfws.Destroy(cmd.Context())
+	return tfws.Destroy(cmd.Context(), flagVarFiles...)
 }
 
 // ── shared helpers ──────────────────────────────────────────────────

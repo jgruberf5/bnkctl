@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 
+	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
 )
 
@@ -48,12 +49,30 @@ See docs/PRD.md or https://github.com/jgruberf5/bnkctl for the full surface.`,
 // Execute runs the root command. Wires SIGINT (Ctrl+C) to a cancellable
 // context so long-running operations like terraform apply terminate
 // promptly and child processes get cleaned up.
+//
+// Loads $PWD/.env at startup if present — godotenv's Load does NOT
+// overwrite existing env vars, so anything already in the shell wins.
+// Lets users keep IBMCLOUD_API_KEY, GITHUB_TOKEN, TF_VAR_* etc. in a
+// project-scoped file instead of shell profiles.
 func Execute() {
+	loadDotenv()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "bnkctl: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+// loadDotenv reads ./.env if present. Missing file is silent (the
+// common case for users who don't use one). Parse errors are loud —
+// otherwise a typo in the file would leave creds mysteriously unset.
+func loadDotenv() {
+	if _, err := os.Stat(".env"); err != nil {
+		return
+	}
+	if err := godotenv.Load(); err != nil {
+		fmt.Fprintf(os.Stderr, "bnkctl: warning: parsing .env: %v\n", err)
 	}
 }
 

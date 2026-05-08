@@ -133,6 +133,41 @@ The Terraform source is pinned at `init` time to the latest release tag of [`ibm
 - **User tfvars override** *(optional)*: `~/.bnkctl/<workspace>/terraform.tfvars.user` — see [Importing an existing tfvars](#importing-an-existing-terraformtfvars) below.
 - **Override base dir:** `BNKCTL_HOME=/path/to/state` env var.
 - **Secrets:** `IBMCLOUD_API_KEY` env var or OS keychain (macOS Keychain / libsecret / Windows Credential Manager via `zalando/go-keyring`). Plaintext API keys in `config.yaml` are rejected at load time.
+- **`.env` file in cwd:** bnkctl loads `./.env` at startup (if present) so project-scoped credentials don't have to live in your shell profile. Existing environment variables take precedence — `.env` only fills in unset ones.
+
+### `.env` in the working directory
+
+Any process-level env var bnkctl reads can come from a `.env` file in the directory where you run `bnkctl`. Standard `KEY=VALUE` syntax with `#` comments and quoted values, parsed by [`github.com/joho/godotenv`](https://github.com/joho/godotenv).
+
+```ini
+# .env (in your project dir)
+IBMCLOUD_API_KEY=oJwJ5M-_***
+IBMCLOUD_REGION=us-south
+GITHUB_TOKEN=ghp_***            # raises self-update / TF-source rate limits
+TF_VAR_ibmcloud_resource_group=my-rg   # any TF_VAR_* feeds straight to terraform
+```
+
+Then:
+
+```bash
+cd ~/myproject
+bnkctl up                       # picks up .env automatically
+```
+
+Precedence:
+
+1. Existing env (your shell, CI runner) — wins.
+2. `.env` values — fill in anything unset.
+3. OS keychain (for `IBMCLOUD_API_KEY` only) — fallback.
+4. Interactive prompt — last resort, only on a TTY.
+
+`.env` only loads from cwd, not the workspace dir or `$HOME`. The convention follows tools like `direnv` / `dotenv-cli` / Docker Compose. **Make sure `.env` is in your project's `.gitignore`** — it has secrets.
+
+If `.env` exists but parses badly, bnkctl prints a warning and continues with whatever env vars were already set:
+
+```
+bnkctl: warning: parsing .env: line 3: unterminated string
+```
 
 ### Supplying your own `terraform.tfvars`
 

@@ -7,6 +7,7 @@ require (
 	github.com/IBM/ibm-cos-sdk-go v1.11.0
 	github.com/IBM/platform-services-go-sdk v0.66.0
 	github.com/hashicorp/terraform-exec v0.21.0
+	github.com/joho/godotenv v1.5.1
 	github.com/spf13/cobra v1.8.1
 	github.com/zalando/go-keyring v0.2.5
 	golang.org/x/term v0.21.0

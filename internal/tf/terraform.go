@@ -71,6 +71,16 @@ func Open(
 			return nil, fmt.Errorf("creating %s: %w", filepath.Join(kcDir, sub), err)
 		}
 	}
+	// FLO scratch dir + the f5-manifest subdir its local-exec provisioners
+	// expect. Same MkdirAll-self defense — the upstream module's curl
+	// and tar commands assume the parent exists.
+	scratchDir := filepath.Join(stateDir, "scratch")
+	for _, sub := range []string{"", "f5-manifest"} {
+		p := filepath.Join(scratchDir, sub)
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			return nil, fmt.Errorf("creating %s: %w", p, err)
+		}
+	}
 
 	sourceDir, err := FetchSource(ctx, wsCfg.TFSource, srcRoot)
 	if err != nil {
@@ -166,11 +176,12 @@ func (w *Workspace) StatePath() string {
 }
 
 // WriteTFVars renders wsCfg into the workspace's terraform.tfvars file
-// (excluding api_key — see WriteTFVars in vars.go). kubeconfig_dir is
-// rendered at <stateDir>/kubeconfig — bnkctl pre-creates the per-module
-// subdirs in Open() so the IBM provider's data sources find them.
+// (excluding api_key — see WriteTFVars in vars.go). bnkctl-managed
+// paths (kubeconfig_dir, scratch_dir) are pre-created in Open() so the
+// IBM provider's data sources and FLO's local-exec provisioners find
+// them.
 func (w *Workspace) WriteTFVars(wsCfg *config.Workspace) error {
-	return WriteTFVars(w.TFVarsPath(), wsCfg, w.KubeconfigDir())
+	return WriteTFVars(w.TFVarsPath(), wsCfg, w.KubeconfigDir(), w.ScratchDir())
 }
 
 // KubeconfigDir is the path threaded through to the root TF's
@@ -178,6 +189,13 @@ func (w *Workspace) WriteTFVars(wsCfg *config.Workspace) error {
 // name as a subdir; bnkctl pre-creates them in Open.
 func (w *Workspace) KubeconfigDir() string {
 	return filepath.Join(w.stateDir, "kubeconfig")
+}
+
+// ScratchDir is the path threaded to the root TF's scratch_dir variable
+// (v0.6.9+) for FLO's FAR auth tarball + f5-manifest extraction. The
+// upstream module derives manifest_download_dir as ${scratch_dir}/f5-manifest.
+func (w *Workspace) ScratchDir() string {
+	return filepath.Join(w.stateDir, "scratch")
 }
 
 // Init runs `terraform init`.

@@ -19,7 +19,7 @@ func TestRenderTFVars_CreateMode(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	if err := RenderTFVars(&buf, ws, ""); err != nil {
+	if err := RenderTFVars(&buf, ws, "", ""); err != nil {
 		t.Fatalf("RenderTFVars: %v", err)
 	}
 
@@ -50,7 +50,7 @@ func TestRenderTFVars_AttachMode(t *testing.T) {
 		Cluster:  config.ClusterCfg{Create: false, Name: "existing-cluster"},
 	}
 	var buf bytes.Buffer
-	if err := RenderTFVars(&buf, ws, ""); err != nil {
+	if err := RenderTFVars(&buf, ws, "", ""); err != nil {
 		t.Fatalf("RenderTFVars: %v", err)
 	}
 	out := buf.String()
@@ -71,7 +71,7 @@ func TestRenderTFVars_OmitsEmptyFields(t *testing.T) {
 		Cluster: config.ClusterCfg{Create: true, Name: "demo"},
 	}
 	var buf bytes.Buffer
-	if err := RenderTFVars(&buf, ws, ""); err != nil {
+	if err := RenderTFVars(&buf, ws, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
@@ -86,23 +86,29 @@ func TestRenderTFVars_KubeconfigDir(t *testing.T) {
 		Cluster: config.ClusterCfg{Create: true, Name: "demo"},
 	}
 	var buf bytes.Buffer
-	if err := RenderTFVars(&buf, ws, "/home/user/.bnkctl/default/state/kubeconfig"); err != nil {
+	if err := RenderTFVars(&buf, ws, "/home/user/.bnkctl/default/state/kubeconfig", "/home/user/.bnkctl/default/state/scratch"); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
-	want := `kubeconfig_dir = "/home/user/.bnkctl/default/state/kubeconfig"`
-	if !strings.Contains(out, want) {
-		t.Errorf("missing %s\noutput:\n%s", want, out)
+	for _, want := range []string{
+		`kubeconfig_dir = "/home/user/.bnkctl/default/state/kubeconfig"`,
+		`scratch_dir = "/home/user/.bnkctl/default/state/scratch"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s\noutput:\n%s", want, out)
+		}
 	}
 
-	// Empty string should NOT emit the line — keeps tfvars clean for
+	// Empty strings should NOT emit the lines — keeps tfvars clean for
 	// callers that don't want this rendering.
 	buf.Reset()
-	if err := RenderTFVars(&buf, ws, ""); err != nil {
+	if err := RenderTFVars(&buf, ws, "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(buf.String(), "kubeconfig_dir") {
-		t.Errorf("empty kubeconfigDir should not emit a line\noutput:\n%s", buf.String())
+	for _, k := range []string{"kubeconfig_dir", "scratch_dir"} {
+		if strings.Contains(buf.String(), k) {
+			t.Errorf("empty %s should not emit a line\noutput:\n%s", k, buf.String())
+		}
 	}
 }
 
@@ -116,7 +122,7 @@ func TestRenderTFVars_BNKFields(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	if err := RenderTFVars(&buf, ws, ""); err != nil {
+	if err := RenderTFVars(&buf, ws, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()

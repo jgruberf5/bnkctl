@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -14,6 +16,16 @@ import (
 	"github.com/jgruberf5/bnkctl/internal/ibm"
 	"github.com/jgruberf5/bnkctl/internal/k8s"
 	"github.com/jgruberf5/bnkctl/internal/tf"
+)
+
+// Apply retry tuning. ROKS master endpoints take 1–5 minutes to fully
+// propagate after creation; the cneinstance/license/cert-manager
+// modules race that propagation by curl-ing the master directly. When
+// terraform-exec surfaces a transient-shaped failure, sleep and retry
+// rather than making the user type `bnkctl up` again.
+const (
+	applyMaxAttempts = 3
+	applyRetryWait   = 60 * time.Second
 )
 
 // Shared across init/up/apply/down — only one runs per invocation, so a
@@ -117,7 +129,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	}
 
 	fmt.Fprintln(os.Stderr, "→ terraform apply")
-	if err := tfws.Apply(cmd.Context(), flagVarFiles...); err != nil {
+	if err := applyWithRetry(cmd.Context(), tfws, flagVarFiles); err != nil {
 		return err
 	}
 	tryAutoKubeconfig(cmd.Context(), cctx, tfws)
@@ -149,7 +161,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "→ terraform apply")
-	if err := tfws.Apply(cmd.Context(), flagVarFiles...); err != nil {
+	if err := applyWithRetry(cmd.Context(), tfws, flagVarFiles); err != nil {
 		return err
 	}
 	tryAutoKubeconfig(cmd.Context(), cctx, tfws)
@@ -313,4 +325,70 @@ func resolveClusterIdentity(ctx context.Context, cctx *config.Context, tfws *tf.
 		return cctx.Workspace.Cluster.Name
 	}
 	return ""
+}
+
+// applyWithRetry wraps tfws.Apply with bounded retries on transient
+// failures. Terraform's natural idempotence makes retry safe — already
+// created resources are skipped on subsequent runs; only the failed
+// null_resources / data sources re-execute.
+//
+// Triggers a retry on any of the heuristic patterns in looksTransient,
+// up to applyMaxAttempts total. Sleeps applyRetryWait between attempts
+// so the master endpoint or other timing-sensitive resources can settle.
+func applyWithRetry(ctx context.Context, tfws *tf.Workspace, varFiles []string) error {
+	var err error
+	for attempt := 1; attempt <= applyMaxAttempts; attempt++ {
+		err = tfws.Apply(ctx, varFiles...)
+		if err == nil {
+			return nil
+		}
+		if !looksTransient(err) {
+			return err
+		}
+		if attempt == applyMaxAttempts {
+			fmt.Fprintf(os.Stderr, "\n✗ apply still failing after %d attempts — giving up\n", applyMaxAttempts)
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "\n→ apply attempt %d hit a transient-looking failure; waiting %s and retrying...\n",
+			attempt, applyRetryWait)
+		select {
+		case <-time.After(applyRetryWait):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return err
+}
+
+// looksTransient reports whether an apply error matches one of the
+// known apply-time race patterns. Heuristic, not exhaustive — false
+// negatives just mean the user retries manually like before.
+//
+// Cases covered:
+//   - "exit status 7" — curl couldn't connect (master endpoint not yet
+//     propagated; the cneinstance SCC binding curls hit this)
+//   - "Connection refused" / "i/o timeout" / "no route to host" — same
+//     class of network race
+//   - "to download the config doesn't exist" — the IBM provider's
+//     ibm_container_cluster_config target dir is missing (we pre-create
+//     it now, but pin the safety net for older state)
+func looksTransient(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	for _, pat := range []string{
+		"exit status 7",
+		"Connection refused",
+		"connection refused",
+		"i/o timeout",
+		"no route to host",
+		"to download the config doesn't exist",
+		"failed to dial",
+	} {
+		if strings.Contains(s, pat) {
+			return true
+		}
+	}
+	return false
 }

@@ -132,8 +132,43 @@ The Terraform source is pinned at `init` time to the latest release tag of [`ibm
 - **State:** `~/.bnkctl/<workspace>/state/` — `terraform.tfstate`, the auto-generated `terraform.tfvars`, kubeconfig, scratch downloads.
 - **User tfvars override** *(optional)*: `~/.bnkctl/<workspace>/terraform.tfvars.user` — see [Importing an existing tfvars](#importing-an-existing-terraformtfvars) below.
 - **Override base dir:** `BNKCTL_HOME=/path/to/state` env var.
-- **Secrets:** `IBMCLOUD_API_KEY` env var or OS keychain (macOS Keychain / libsecret / Windows Credential Manager via `zalando/go-keyring`). Plaintext API keys in `config.yaml` are rejected at load time.
+- **Secrets:** `IBMCLOUD_API_KEY` env var, OS keychain (macOS Keychain / libsecret / Windows Credential Manager via `zalando/go-keyring`), or — opt-in — a base64-encoded `api_key_b64` field in the workspace `config.yaml`. Plaintext `api_key:` is still rejected. The keychain/env path is the recommended secure default; see [API key resolution](#api-key-resolution) below.
 - **`.env` file in cwd:** bnkctl loads `./.env` at startup (if present) so project-scoped credentials don't have to live in your shell profile. Existing environment variables take precedence — `.env` only fills in unset ones.
+
+### API key resolution
+
+When bnkctl needs the IBM Cloud API key — at `init`, before any cluster operation, before terraform runs — it walks this chain:
+
+1. **Environment variables** (in order): `IBMCLOUD_API_KEY`, `IC_API_KEY`, `TF_VAR_ibmcloud_api_key`, `TF_VAR_IBMCLOUD_API_KEY`, `TF_VAR_IC_API_KEY`.
+2. **OS keychain** — `bnkctl` service, user `<workspace>/ibmcloud_api_key`. Saved via `bnkctl init`'s post-prompt offer.
+3. **Workspace config** — `ibmcloud.api_key_b64` (base64-encoded, see warning below).
+4. **Interactive prompt** — only on a TTY; offers to save to the keychain after.
+
+To pin a single source, set `ibmcloud.api_key_source: env|keychain|config|prompt` in `config.yaml` — bypasses the chain entirely.
+
+#### Storing the key in `config.yaml` (base64 — opt-in)
+
+If keychain isn't an option (sealed CI workstation, custom VM image, working-from-a-flash-drive scenario) and you don't want to pass `IBMCLOUD_API_KEY` on every invocation, you can paste a base64-encoded copy directly into the workspace config:
+
+```bash
+echo -n "$IBMCLOUD_API_KEY" | base64
+# 9MfeoOlh...
+
+# Then edit ~/.bnkctl/<workspace>/config.yaml:
+#   ibmcloud:
+#     region: us-south
+#     resource_group: default
+#     api_key_b64: 9MfeoOlh...
+```
+
+> ⚠️ **base64 is obfuscation, not encryption.** Anyone with the file can `base64 -d` instantly — equivalent to plaintext for security purposes. Use only when:
+> - The file lives on a single-user machine, `chmod 600`-ed.
+> - The workspace dir is in `.gitignore` (or you're not in a git repo).
+> - You'd otherwise be tempted to leave the key in a shell-history-bearing `export IBMCLOUD_API_KEY=…`.
+>
+> The recommended path stays `IBMCLOUD_API_KEY` env (per-invocation or via `.env`) or the OS keychain (cross-shell persistence with system-level access control).
+
+The plaintext-rejection guard for `config.yaml` only blocks fields *named* `api_key` / `apikey` / `password` / `token` / etc. — it doesn't reject `api_key_b64` because the field name signals user intent ("I know what I'm doing").
 
 ### `.env` in the working directory
 

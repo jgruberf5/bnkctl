@@ -29,7 +29,19 @@ type Workspace struct {
 type IBMCloudCfg struct {
 	Region        string `yaml:"region"`
 	ResourceGroup string `yaml:"resource_group"`
-	APIKeySource  string `yaml:"api_key_source,omitempty"` // env | keychain | prompt — see secrets.go
+	APIKeySource  string `yaml:"api_key_source,omitempty"` // env | keychain | config | prompt — see secrets.go
+
+	// APIKeyB64 stores the API key base64-encoded inline in the workspace
+	// config. This is OBFUSCATION, NOT ENCRYPTION — anyone with the file
+	// can decode it instantly. Treat the file like a plaintext credential:
+	// chmod 600, .gitignore, never commit. Provided as a convenience for
+	// single-user setups; the keychain or env-var path is the recommended
+	// secure default.
+	//
+	// Note that the field name does NOT match the rejectPlaintextSecrets
+	// regex (which guards `api_key`, not `api_key_b64`), so the value
+	// loads normally without tripping the plaintext rejection.
+	APIKeyB64 string `yaml:"api_key_b64,omitempty"`
 }
 
 type ClusterCfg struct {

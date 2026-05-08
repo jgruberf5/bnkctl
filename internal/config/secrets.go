@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 const (
 	APIKeySourceEnv      = "env"
 	APIKeySourceKeychain = "keychain"
+	APIKeySourceConfig   = "config" // base64-encoded in workspace config.yaml — obfuscation only
 	APIKeySourcePrompt   = "prompt"
 
 	// keychainService is the OS-keychain "service" namespace bnkctl uses.
@@ -36,9 +38,10 @@ var apiKeyEnvVars = []string{
 //
 // source overrides the resolution chain when non-empty:
 //
-//	""         — env → keychain → prompt → error
+//	""         — env → keychain → config (base64) → prompt → error
 //	"env"      — env only
 //	"keychain" — keychain only
+//	"config"   — base64-decoded api_key_b64 in workspace config.yaml only
 //	"prompt"   — interactive prompt only (errors if stdin is not a TTY)
 func ResolveAPIKey(workspace, source string) (string, error) {
 	switch source {
@@ -47,6 +50,9 @@ func ResolveAPIKey(workspace, source string) (string, error) {
 			return k, nil
 		}
 		if k, err := apiKeyFromKeychain(workspace); err == nil && k != "" {
+			return k, nil
+		}
+		if k, err := apiKeyFromConfig(workspace); err == nil && k != "" {
 			return k, nil
 		}
 		return apiKeyFromPrompt(workspace)
@@ -64,10 +70,19 @@ func ResolveAPIKey(workspace, source string) (string, error) {
 			return "", fmt.Errorf("no API key for workspace %q in OS keychain", workspace)
 		}
 		return k, nil
+	case APIKeySourceConfig:
+		k, err := apiKeyFromConfig(workspace)
+		if err != nil {
+			return "", err
+		}
+		if k == "" {
+			return "", fmt.Errorf("no api_key_b64 set in workspace %q config.yaml", workspace)
+		}
+		return k, nil
 	case APIKeySourcePrompt:
 		return apiKeyFromPrompt(workspace)
 	default:
-		return "", fmt.Errorf("unknown api_key_source %q (want env|keychain|prompt)", source)
+		return "", fmt.Errorf("unknown api_key_source %q (want env|keychain|config|prompt)", source)
 	}
 }
 
@@ -78,6 +93,46 @@ func apiKeyFromEnv() (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// apiKeyFromConfig reads api_key_b64 from the workspace's config.yaml,
+// base64-decodes it, and returns the plaintext.
+//
+// Returns empty (no error) when the field is unset or the workspace
+// hasn't been initialised yet — falls through to the next source in
+// the resolution chain.
+//
+// Reminder: base64 is OBFUSCATION, not encryption. Anyone with the
+// file can decode it. The recommended secure path is the OS keychain.
+func apiKeyFromConfig(workspace string) (string, error) {
+	ws, err := LoadWorkspace(workspace)
+	if err != nil {
+		if errors.Is(err, ErrWorkspaceNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	if ws.IBMCloud.APIKeyB64 == "" {
+		return "", nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(ws.IBMCloud.APIKeyB64))
+	if err != nil {
+		return "", fmt.Errorf("decoding api_key_b64 from %q config.yaml: %w", workspace, err)
+	}
+	key := strings.TrimSpace(string(decoded))
+	if key == "" {
+		return "", fmt.Errorf("api_key_b64 in %q config.yaml decodes to empty", workspace)
+	}
+	return key, nil
+}
+
+// EncodeAPIKeyForConfig base64-encodes a plaintext API key for storage
+// in IBMCloudCfg.APIKeyB64. Convenience for callers (e.g. `bnkctl init
+// --save-api-key` in v1.x); users can also encode by hand:
+//
+//	echo -n "$IBMCLOUD_API_KEY" | base64
+func EncodeAPIKeyForConfig(plaintext string) string {
+	return base64.StdEncoding.EncodeToString([]byte(plaintext))
 }
 
 func apiKeyFromKeychain(workspace string) (string, error) {

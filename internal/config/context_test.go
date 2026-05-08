@@ -198,3 +198,71 @@ func TestSetCurrent_RejectsMissingWorkspace(t *testing.T) {
 		t.Fatal("expected SetCurrent to reject missing workspace")
 	}
 }
+
+func TestAPIKeyFromConfig_Roundtrip(t *testing.T) {
+	t.Setenv(BNKCTLHomeEnv, t.TempDir())
+	// Don't let the host env shadow the config-stored key.
+	for _, v := range []string{"IBMCLOUD_API_KEY", "IC_API_KEY", "TF_VAR_ibmcloud_api_key", "TF_VAR_IBMCLOUD_API_KEY", "TF_VAR_IC_API_KEY"} {
+		t.Setenv(v, "")
+	}
+
+	plaintext := "test-api-key-12345"
+	encoded := EncodeAPIKeyForConfig(plaintext)
+
+	ws := &Workspace{
+		IBMCloud: IBMCloudCfg{Region: "us-south", APIKeyB64: encoded},
+		Cluster:  ClusterCfg{Create: true, Name: "demo"},
+		TFSource: TFSourceCfg{Type: "github", Repo: "x/y", Ref: "v0.0.1"},
+	}
+	if err := SaveWorkspace("demo", ws); err != nil {
+		t.Fatalf("SaveWorkspace: %v", err)
+	}
+
+	// Default chain (env empty, keychain empty in test env, config has key)
+	got, err := ResolveAPIKey("demo", "")
+	if err != nil {
+		t.Fatalf("ResolveAPIKey: %v", err)
+	}
+	if got != plaintext {
+		t.Errorf("got %q, want %q", got, plaintext)
+	}
+
+	// Explicit "config" source
+	got, err = ResolveAPIKey("demo", APIKeySourceConfig)
+	if err != nil {
+		t.Fatalf("ResolveAPIKey(config): %v", err)
+	}
+	if got != plaintext {
+		t.Errorf("explicit source: got %q, want %q", got, plaintext)
+	}
+}
+
+func TestAPIKeyFromConfig_NotSet(t *testing.T) {
+	t.Setenv(BNKCTLHomeEnv, t.TempDir())
+
+	// Workspace exists but has no api_key_b64.
+	if err := SaveWorkspace("empty", &Workspace{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveAPIKey("empty", APIKeySourceConfig); err == nil {
+		t.Error("expected error when api_key_b64 unset and source pinned to config")
+	}
+}
+
+func TestRejectPlaintextSecrets_DoesNotRejectAPIKeyB64(t *testing.T) {
+	t.Setenv(BNKCTLHomeEnv, t.TempDir())
+
+	ws := &Workspace{
+		IBMCloud: IBMCloudCfg{Region: "us-south", APIKeyB64: EncodeAPIKeyForConfig("k")},
+		Cluster:  ClusterCfg{Create: true, Name: "demo"},
+		TFSource: TFSourceCfg{Type: "github", Repo: "x/y", Ref: "v0.0.1"},
+	}
+	if err := SaveWorkspace("ok", ws); err != nil {
+		t.Fatal(err)
+	}
+	// Ensure the saved file loads cleanly — i.e., the plaintext-rejection
+	// regex doesn't false-positive on `api_key_b64:`.
+	if _, err := LoadWorkspace("ok"); err != nil {
+		t.Errorf("api_key_b64 should not trip plaintext rejection; got %v", err)
+	}
+}

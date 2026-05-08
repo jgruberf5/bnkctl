@@ -205,10 +205,15 @@ func openTF(ctx context.Context, needAPIKey bool) (*config.Context, *tf.Workspac
 }
 
 // writeAndInit renders tfvars and runs terraform init. Common preamble
-// for plan/apply/up/down.
+// for plan/apply/up/down. Notes when a user-supplied tfvars override
+// is going to be layered on top — visible cue so users aren't
+// surprised when their values land.
 func writeAndInit(ctx context.Context, tfws *tf.Workspace, ws *config.Workspace) error {
 	if err := tfws.WriteTFVars(ws); err != nil {
 		return fmt.Errorf("writing tfvars: %w", err)
+	}
+	if tfws.HasUserTFVars() {
+		fmt.Fprintf(os.Stderr, "→ Layering user tfvars from %s (overrides config.yaml-derived values)\n", tfws.UserTFVarsPath())
 	}
 	fmt.Fprintln(os.Stderr, "→ terraform init")
 	return tfws.Init(ctx)

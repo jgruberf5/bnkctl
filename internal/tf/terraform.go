@@ -103,9 +103,36 @@ func (w *Workspace) SourceDir() string { return w.sourceDir }
 // StateDir is the bnkctl per-workspace state root.
 func (w *Workspace) StateDir() string { return w.stateDir }
 
-// TFVarsPath: <stateDir>/terraform.tfvars
+// TFVarsPath: <stateDir>/terraform.tfvars  (auto-rendered from config.yaml; do not hand-edit)
 func (w *Workspace) TFVarsPath() string {
 	return filepath.Join(w.stateDir, "terraform.tfvars")
+}
+
+// UserTFVarsPath: <workspace-dir>/terraform.tfvars.user (sibling to
+// config.yaml). Optional — if present, bnkctl passes it to terraform
+// as a second -var-file after the auto-rendered one, so values in the
+// user file override values from config.yaml. Useful for variables
+// bnkctl's RenderTFVars doesn't expose (testing_*, roks_min_worker_*,
+// cert_manager_namespace, etc.) or for one-off overrides.
+func (w *Workspace) UserTFVarsPath() string {
+	return filepath.Join(filepath.Dir(w.stateDir), "terraform.tfvars.user")
+}
+
+// HasUserTFVars reports whether the optional override file exists.
+func (w *Workspace) HasUserTFVars() bool {
+	_, err := os.Stat(w.UserTFVarsPath())
+	return err == nil
+}
+
+// varFiles returns the list of -var-file paths to pass terraform. Order
+// matters: later files override earlier (terraform spec). The user's
+// override file goes last so user values win.
+func (w *Workspace) varFiles() []string {
+	paths := []string{w.TFVarsPath()}
+	if w.HasUserTFVars() {
+		paths = append(paths, w.UserTFVarsPath())
+	}
+	return paths
 }
 
 // StatePath: <stateDir>/terraform.tfstate
@@ -126,28 +153,31 @@ func (w *Workspace) Init(ctx context.Context) error {
 
 // Plan runs `terraform plan`. Returns true if changes are pending.
 func (w *Workspace) Plan(ctx context.Context) (bool, error) {
-	return w.tf.Plan(ctx,
-		tfexec.VarFile(w.TFVarsPath()),
-		tfexec.State(w.StatePath()),
-	)
+	opts := []tfexec.PlanOption{tfexec.State(w.StatePath())}
+	for _, p := range w.varFiles() {
+		opts = append(opts, tfexec.VarFile(p))
+	}
+	return w.tf.Plan(ctx, opts...)
 }
 
 // Apply runs `terraform apply`. tfexec auto-passes -auto-approve since
 // terraform-exec doesn't allow interactive prompts; bnkctl's own
 // confirmation gate runs at the CLI layer instead.
 func (w *Workspace) Apply(ctx context.Context) error {
-	return w.tf.Apply(ctx,
-		tfexec.VarFile(w.TFVarsPath()),
-		tfexec.State(w.StatePath()),
-	)
+	opts := []tfexec.ApplyOption{tfexec.State(w.StatePath())}
+	for _, p := range w.varFiles() {
+		opts = append(opts, tfexec.VarFile(p))
+	}
+	return w.tf.Apply(ctx, opts...)
 }
 
 // Destroy runs `terraform destroy`.
 func (w *Workspace) Destroy(ctx context.Context) error {
-	return w.tf.Destroy(ctx,
-		tfexec.VarFile(w.TFVarsPath()),
-		tfexec.State(w.StatePath()),
-	)
+	opts := []tfexec.DestroyOption{tfexec.State(w.StatePath())}
+	for _, p := range w.varFiles() {
+		opts = append(opts, tfexec.VarFile(p))
+	}
+	return w.tf.Destroy(ctx, opts...)
 }
 
 // Output reads terraform outputs (raw values + sensitivity flags).

@@ -39,7 +39,8 @@ checksum:
   name_template: "checksums.txt"
 
 snapshot:
-  name_template: "{{ incpatch .Version }}-snapshot"
+  # goreleaser v2 renamed name_template → version_template here.
+  version_template: "{{ incpatch .Version }}-snapshot"
 
 changelog:
   sort: asc
